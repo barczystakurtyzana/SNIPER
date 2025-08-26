@@ -5,4 +5,5 @@ pub mod rpc_manager;
 pub mod nonce_manager;
 pub mod buy_engine;
 pub mod sniffer;
+pub mod candidate_buffer;
 pub mod gui;

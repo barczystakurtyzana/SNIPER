@@ -23,7 +23,8 @@ pub fn launch_gui(
 ) -> Result<()> {
     let native_options = eframe::NativeOptions::default();
     let app = BotApp::new(app_state, gui_tx, refresh);
-    eframe::run_native(title, native_options, Box::new(|_| Box::new(app)))?;
+    eframe::run_native(title, native_options, Box::new(|_| Box::new(app)))
+        .map_err(|e| anyhow::anyhow!("GUI error: {}", e))?;
     Ok(())
 }
 
@@ -100,8 +101,7 @@ impl App for BotApp {
         ctx.request_repaint_after(self.refresh);
     }
 
-    fn on_close_event(&mut self) -> bool {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         info!("GUI closed");
-        true
     }
 }

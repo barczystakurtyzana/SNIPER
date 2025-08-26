@@ -180,7 +180,7 @@ impl CandidateSource for HttpSource {
                                             let _ = cand_tx.send(PremintCandidate {
                                                 mint,
                                                 creator,
-                                                program: program,
+                                                program: program_str.clone(),
                                                 slot,
                                                 timestamp: ts_ms / 1000,
                                             }).await;

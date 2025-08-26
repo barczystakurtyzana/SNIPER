@@ -16,15 +16,6 @@ use crate::sniffer::{run_mock_sniffer};
 use crate::sniffer::runner::SnifferRunner;
 use crate::types::{AppState, CandidateReceiver, CandidateSender, Mode, ProgramLogEvent};
 
-mod buy_engine;
-mod config;
-mod gui;
-mod nonce_manager;
-mod rpc_manager;
-mod sniffer;
-mod time_utils;
-mod types;
-
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()

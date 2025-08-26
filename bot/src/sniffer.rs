@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::{task::JoinHandle, time};
 use tracing::{debug, info, warn};
 
-use solana_sdk::{pubkey::Pubkey, signature::Keypair};
+use solana_sdk::{pubkey::Pubkey, signature::{Keypair, Signer}};
 
 /// TTL window for a mint. Within this duration, repeated occurrences of the same mint are ignored.
 const CANDIDATE_TTL: Duration = Duration::from_secs(5);

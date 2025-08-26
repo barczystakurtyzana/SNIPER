@@ -48,9 +48,9 @@ impl CandidateBuffer {
 
     /// Insert a candidate if not present and not expired.
     /// Returns true when inserted, false when duplicate or ignored.
-    pub async fn push(&mut self, c: PremintCandidate) -> bool {
+    pub fn push(&mut self, c: PremintCandidate) -> bool {
         // Clean expired entries first.
-        let _ = self.cleanup().await;
+        let _ = self.cleanup();
 
         if self.map.contains_key(&c.mint) {
             return false;
@@ -74,9 +74,9 @@ impl CandidateBuffer {
 
     /// Pop the "best" candidate (oldest by insertion time).
     /// Returns None if empty after cleanup or no item is eligible.
-    pub async fn pop_best(&mut self) -> Option<PremintCandidate> {
+    pub fn pop_best(&mut self) -> Option<PremintCandidate> {
         // Remove expired first.
-        let _ = self.cleanup().await;
+        let _ = self.cleanup();
 
         // Pick the oldest entry.
         let oldest_key = self
@@ -90,7 +90,7 @@ impl CandidateBuffer {
 
     /// Remove expired entries according to TTL.
     /// Returns the number of removed entries.
-    pub async fn cleanup(&mut self) -> usize {
+    pub fn cleanup(&mut self) -> usize {
         if self.ttl.is_zero() {
             // If TTL is zero, expire everything immediately.
             let removed = self.map.len();
@@ -136,14 +136,14 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn push_and_dedup() {
+    #[test]
+    fn push_and_dedup() {
         let mut buf = CandidateBuffer::new(Duration::from_secs(30), 10);
         let c1 = mk_candidate(1, 1);
         let c1_dup = mk_candidate(1, 2);
 
-        assert!(buf.push(c1).await);
-        assert!(!buf.push(c1_dup).await, "duplicate mint should be ignored");
+        assert!(buf.push(c1));
+        assert!(!buf.push(c1_dup), "duplicate mint should be ignored");
         assert_eq!(buf.map.len(), 1);
     }
 
@@ -151,13 +151,13 @@ mod tests {
     async fn ttl_cleanup_and_pop() {
         let mut buf = CandidateBuffer::new(Duration::from_millis(50), 10);
         let c = mk_candidate(2, 1);
-        assert!(buf.push(c).await);
+        assert!(buf.push(c));
         assert_eq!(buf.map.len(), 1);
 
         sleep(TokioDuration::from_millis(60)).await;
-        let removed = buf.cleanup().await;
+        let removed = buf.cleanup();
         assert_eq!(removed, 1);
-        assert!(buf.pop_best().await.is_none(), "should be empty after expiry");
+        assert!(buf.pop_best().is_none(), "should be empty after expiry");
     }
 
     #[tokio::test]
@@ -166,20 +166,20 @@ mod tests {
         let c1 = mk_candidate(10, 111);
         let c2 = mk_candidate(11, 222);
 
-        assert!(buf.push(c1.clone()).await);
+        assert!(buf.push(c1.clone()));
         // Ensure different insertion instants
         sleep(TokioDuration::from_millis(5)).await;
-        assert!(buf.push(c2.clone()).await);
+        assert!(buf.push(c2.clone()));
 
         // Oldest should be c1
-        let popped1 = buf.pop_best().await.unwrap();
+        let popped1 = buf.pop_best().unwrap();
         assert_eq!(popped1.mint, c1.mint);
 
         // Next should be c2
-        let popped2 = buf.pop_best().await.unwrap();
+        let popped2 = buf.pop_best().unwrap();
         assert_eq!(popped2.mint, c2.mint);
 
-        assert!(buf.pop_best().await.is_none());
+        assert!(buf.pop_best().is_none());
     }
 
     #[tokio::test]
@@ -189,12 +189,12 @@ mod tests {
         let c2 = mk_candidate(2, 2);
         let c3 = mk_candidate(3, 3);
 
-        assert!(buf.push(c1.clone()).await);
+        assert!(buf.push(c1.clone()));
         sleep(TokioDuration::from_millis(2)).await;
-        assert!(buf.push(c2.clone()).await);
+        assert!(buf.push(c2.clone()));
         sleep(TokioDuration::from_millis(2)).await;
         // Now capacity full; pushing c3 should evict the oldest (c1)
-        assert!(buf.push(c3.clone()).await);
+        assert!(buf.push(c3.clone()));
 
         assert!(!buf.map.contains_key(&c1.mint), "oldest should be evicted");
         assert!(buf.map.contains_key(&c2.mint));

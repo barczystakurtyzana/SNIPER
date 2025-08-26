@@ -206,13 +206,14 @@ mod tests {
     use std::pin::Pin;
     use tokio::sync::mpsc;
 
+    #[derive(Debug)]
     struct AlwaysOkBroadcaster;
     impl RpcBroadcaster for AlwaysOkBroadcaster {
         fn send_on_many_rpc<'a>(
             &'a self,
             _txs: Vec<VersionedTransaction>,
         ) -> Pin<Box<dyn Future<Output = Result<Signature>> + Send + 'a>> {
-            Box::pin(async { Ok(Signature::new(&[7u8; 64])) })
+            Box::pin(async { Ok(Signature::from([7u8; 64])) })
         }
     }
 

@@ -13,7 +13,8 @@ use tokio::{
 use tracing::{debug, error, warn};
 
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_client::rpc_config::{RpcSignaturesForAddressConfig, RpcTransactionConfig};
+use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
+use solana_client::rpc_config::RpcTransactionConfig;
 use solana_sdk::{
     commitment_config::{CommitmentConfig, CommitmentLevel},
     signature::Signature,
@@ -110,7 +111,7 @@ impl CandidateSource for HttpSource {
                 _ = time::sleep(Duration::from_millis(self.cfg.http_poll_interval_ms)) => {
                     let res = http.get_signatures_for_address_with_config(
                         &program,
-                        RpcSignaturesForAddressConfig {
+                        GetConfirmedSignaturesForAddress2Config {
                             limit: Some(self.cfg.http_sig_depth.min(1000)),
                             ..Default::default()
                         }
@@ -140,7 +141,7 @@ impl CandidateSource for HttpSource {
                     let sem = Arc::new(tokio::sync::Semaphore::new(self.cfg.http_max_parallel_tx_fetch.max(1)));
                     let mut tasks = Vec::with_capacity(new_sigs.len());
                     for sig in new_sigs {
-                        let http = http.clone();
+                        let endpoint = self.cfg.rpc_endpoints[0].clone();
                         let sem = sem.clone();
                         let raw_log_tx = raw_log_tx.clone();
                         let cand_tx = cand_tx.clone();
@@ -149,7 +150,8 @@ impl CandidateSource for HttpSource {
 
                         tasks.push(tokio::spawn(async move {
                             let _permit = sem.acquire().await.expect("semaphore");
-
+                            
+                            let http = RpcClient::new_with_commitment(endpoint, commitment);
                             let tx = http.get_transaction_with_config(
                                 &sig,
                                 RpcTransactionConfig {
@@ -162,7 +164,7 @@ impl CandidateSource for HttpSource {
                             if let Ok(txres) = tx {
                                 let slot = txres.slot;
                                 if let Some(meta) = txres.transaction.meta {
-                                    if let Some(logs) = meta.log_messages {
+                                    if let Some(logs) = Option::<Vec<String>>::from(meta.log_messages) {
                                         let ts_ms = now_ms();
 
                                         if let Some(tx_ch) = raw_log_tx.as_ref() {
@@ -180,7 +182,7 @@ impl CandidateSource for HttpSource {
                                             let _ = cand_tx.send(PremintCandidate {
                                                 mint,
                                                 creator,
-                                                program: program,
+                                                program: program_str.clone(),
                                                 slot,
                                                 timestamp: ts_ms / 1000,
                                             }).await;
@@ -197,9 +199,7 @@ impl CandidateSource for HttpSource {
 
                     for t in tasks {
                         if let Ok(sig) = t.await {
-                            if let Ok(sig) = sig {
-                                self.push_seen(sig).await;
-                            }
+                            self.push_seen(sig).await;
                         }
                     }
                 }

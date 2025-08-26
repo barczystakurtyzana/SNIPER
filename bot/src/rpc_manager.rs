@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use solana_client::{
     nonblocking::rpc_client::RpcClient,
     rpc_config::RpcSendTransactionConfig,
@@ -15,7 +15,7 @@ use tokio::{task::JoinSet, time::timeout};
 use tracing::{debug, info, warn};
 
 /// Trait for broadcasting transactions. Allows injecting mock implementations for tests.
-pub trait RpcBroadcaster: Send + Sync {
+pub trait RpcBroadcaster: Send + Sync + std::fmt::Debug {
     /// Broadcast the prepared VersionedTransaction objects; return first successful Signature or Err.
     fn send_on_many_rpc<'a>(
         &'a self,

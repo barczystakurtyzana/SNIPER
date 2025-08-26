@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, Semaphore};
 #[derive(Debug)]
 pub struct NonceManager {
     capacity: usize,
-    sem: Semaphore,
+    sem: Arc<Semaphore>,
     free: Arc<Mutex<VecDeque<usize>>>,
 }
 
@@ -19,7 +19,7 @@ impl NonceManager {
         let free = (0..capacity).collect::<VecDeque<_>>();
         Self {
             capacity,
-            sem: Semaphore::new(capacity),
+            sem: Arc::new(Semaphore::new(capacity)),
             free: Arc::new(Mutex::new(free)),
         }
     }

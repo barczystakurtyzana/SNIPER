@@ -95,7 +95,7 @@ pub async fn fetch_meta_from_rpc(
     let mut creator: Option<Pubkey> = None;
 
     if let Some(meta) = tx.transaction.meta {
-        if let Some(logs) = meta.log_messages {
+        if let Some(logs) = Option::<Vec<String>>::from(meta.log_messages) {
             let (m, c, _) = parse_pump_logs(&logs);
             if m.is_some() {
                 mint = m;
@@ -106,8 +106,9 @@ pub async fn fetch_meta_from_rpc(
         }
 
         if mint.is_none() {
-            if let Some(bal) = meta.post_token_balances.as_ref().and_then(|v| v.get(0)) {
-                if let Some(m_str) = &bal.mint {
+            if let Some(balances) = Option::<&Vec<_>>::from(meta.post_token_balances.as_ref()) {
+                if let Some(bal) = balances.get(0) {
+                    let m_str = &bal.mint;
                     if let Ok(pk) = Pubkey::from_str(m_str) {
                         mint = Some(pk);
                     }

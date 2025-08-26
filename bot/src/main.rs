@@ -7,23 +7,14 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
-use crate::buy_engine::BuyEngine;
-use crate::config::{Config, SnifferMode};
-use crate::gui::{launch_gui, GuiEvent, GuiEventSender};
-use crate::nonce_manager::NonceManager;
-use crate::rpc_manager::{RpcBroadcaster, RpcManager};
-use crate::sniffer::{run_mock_sniffer};
-use crate::sniffer::runner::SnifferRunner;
-use crate::types::{AppState, CandidateReceiver, CandidateSender, Mode, ProgramLogEvent};
-
-mod buy_engine;
-mod config;
-mod gui;
-mod nonce_manager;
-mod rpc_manager;
-mod sniffer;
-mod time_utils;
-mod types;
+use sniffer_bot_light::buy_engine::BuyEngine;
+use sniffer_bot_light::config::{Config, SnifferMode};
+use sniffer_bot_light::gui::{launch_gui, GuiEvent, GuiEventSender};
+use sniffer_bot_light::nonce_manager::NonceManager;
+use sniffer_bot_light::rpc_manager::{RpcBroadcaster, RpcManager};
+use sniffer_bot_light::sniffer;
+use sniffer_bot_light::sniffer::runner::SnifferRunner;
+use sniffer_bot_light::types::{AppState, CandidateReceiver, CandidateSender, Mode, ProgramLogEvent};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {

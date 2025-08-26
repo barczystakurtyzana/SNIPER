@@ -1,0 +1,28 @@
+# Przykładowa konfiguracja
+
+sniffer_mode = "real"
+
+# WSS watchdog + reconnect
+wss_required = false
+wss_heartbeat_ms = 1500
+wss_reconnect_backoff_ms = 500
+wss_reconnect_backoff_max_ms = 10000
+wss_max_silent_ms = 5000
+
+# HTTP fallback
+http_fallback_enabled = true
+http_poll_interval_ms = 1000
+http_sig_depth = 50
+http_max_parallel_tx_fetch = 6
+
+# Metadata backfill
+meta_fetch_enabled = true
+meta_fetch_commitment = "confirmed"
+
+# Endpoints
+rpc_endpoints = ["https://api.mainnet-beta.solana.com"]
+rpc_wss_endpoints = ["wss://api.mainnet-beta.solana.com"]
+
+# Engine/GUI
+nonce_count = 5
+gui_update_interval_ms = 200

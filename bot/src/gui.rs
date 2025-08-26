@@ -7,7 +7,7 @@ use eframe::{App, Frame};
 use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::info;
 
-use crate::types::{AppState, Mode, PremintCandidate};
+use crate::types::{AppState, Mode};
 
 #[derive(Clone, Debug)]
 pub enum GuiEvent {

@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use tokio::{
     sync::{mpsc::Sender, Notify, RwLock},
     time,
@@ -125,14 +126,14 @@ impl CandidateSource for WssSource {
                                 let _ = unsub().await;
                                 return;
                             }
-                            msg = sub.recv() => {
+                            msg = sub.next() => {
                                 match msg {
                                     Some(ev) => {
                                         self.update_heartbeat();
 
                                         let sig = ev.value.signature.to_string();
                                         let slot = ev.context.slot;
-                                        let logs = ev.value.logs.unwrap_or_default();
+                                        let logs = ev.value.logs;
                                         let ts_ms = now_ms();
 
                                         if let Some(tx) = raw_log_tx.as_ref() {
@@ -157,7 +158,7 @@ impl CandidateSource for WssSource {
                                                         let _ = cand_tx.send(PremintCandidate {
                                                             mint,
                                                             creator,
-                                                            program: program,
+                                                            program: program.to_string(),
                                                             slot,
                                                             timestamp: ts_ms / 1000,
                                                         }).await;
@@ -171,7 +172,7 @@ impl CandidateSource for WssSource {
                                         let _ = cand_tx.send(PremintCandidate {
                                             mint: maybe_mint.unwrap(),
                                             creator: maybe_creator.unwrap(),
-                                            program,
+                                            program: program.to_string(),
                                             slot,
                                             timestamp: ts_ms / 1000,
                                         }).await;

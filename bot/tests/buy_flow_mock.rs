@@ -40,7 +40,7 @@ impl RpcBroadcaster for PatternBroadcaster {
             {
                 let mut b = [0u8; 64];
                 b[0] = (i as u8) + 1;
-                return Ok(Signature::new(&b));
+                return Ok(Signature::from(b));
             }
             anyhow::bail!("PatternBroadcaster: all endpoints failing for {} tx(s)", n);
         })
@@ -54,7 +54,7 @@ impl RpcBroadcaster for AlwaysOk {
         &'a self,
         _txs: Vec<VersionedTransaction>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Signature>> + Send + 'a>> {
-        Box::pin(async move { Ok(Signature::new(&[9u8; 64])) })
+        Box::pin(async move { Ok(Signature::from([9u8; 64])) })
     }
 }
 

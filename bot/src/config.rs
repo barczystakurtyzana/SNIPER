@@ -14,6 +14,21 @@ impl Default for SnifferMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BroadcastMode {
+    Pairwise,
+    ReplicateSingle,
+    RoundRobin,
+    FullFanout,
+}
+
+impl Default for BroadcastMode {
+    fn default() -> Self {
+        BroadcastMode::Pairwise
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     // Endpoints
@@ -34,6 +49,14 @@ pub struct Config {
     // Mode
     #[serde(default)]
     pub sniffer_mode: SnifferMode,
+    
+    // Broadcast configuration
+    #[serde(default)]
+    pub broadcast_mode: BroadcastMode,
+    #[serde(default = "default_rpc_timeout_secs")]
+    pub rpc_timeout_secs: u64,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
 
     // Metadata fetch (Iteration 9)
     #[serde(default)]
@@ -73,6 +96,9 @@ impl Default for Config {
             nonce_count: default_nonce_count(),
             gui_update_interval_ms: default_gui_interval(),
             sniffer_mode: SnifferMode::Mock,
+            broadcast_mode: BroadcastMode::default(),
+            rpc_timeout_secs: default_rpc_timeout_secs(),
+            max_retries: default_max_retries(),
             meta_fetch_enabled: false,
             meta_fetch_commitment: Some("confirmed".to_string()),
             wss_required: false,
@@ -99,6 +125,12 @@ fn default_nonce_count() -> usize {
 }
 fn default_gui_interval() -> u64 {
     200
+}
+fn default_rpc_timeout_secs() -> u64 {
+    8
+}
+fn default_max_retries() -> u32 {
+    3
 }
 
 // WSS defaults

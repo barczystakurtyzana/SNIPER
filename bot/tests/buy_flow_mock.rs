@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use sniffer_bot_light::buy_engine::BuyEngine;
 use sniffer_bot_light::config::Config;
 use sniffer_bot_light::nonce_manager::NonceManager;
+use sniffer_bot_light::observability::CorrelationId;
 use sniffer_bot_light::rpc_manager::RpcBroadcaster;
 use sniffer_bot_light::types::{AppState, CandidateReceiver, CandidateSender, Mode, PremintCandidate};
 
@@ -28,6 +29,7 @@ impl RpcBroadcaster for PatternBroadcaster {
     fn send_on_many_rpc<'a>(
         &'a self,
         txs: Vec<VersionedTransaction>,
+        _correlation_id: Option<CorrelationId>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Signature>> + Send + 'a>> {
         Box::pin(async move {
             let n = txs.len();
@@ -53,6 +55,7 @@ impl RpcBroadcaster for AlwaysOk {
     fn send_on_many_rpc<'a>(
         &'a self,
         _txs: Vec<VersionedTransaction>,
+        _correlation_id: Option<CorrelationId>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Signature>> + Send + 'a>> {
         Box::pin(async move { Ok(Signature::from([9u8; 64])) })
     }

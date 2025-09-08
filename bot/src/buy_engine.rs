@@ -23,6 +23,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::nonce_manager::{NonceManager, NonceLease};
+use crate::observability::{CorrelationId, StructuredLogger};
 use crate::rpc_manager::RpcBroadcaster;
 use crate::tx_builder::{TransactionBuilder, TransactionConfig};
 use crate::types::{AppState, CandidateReceiver, Mode, PremintCandidate};
@@ -145,13 +146,33 @@ impl BuyEngine {
                         }
 
                         info!(mint=%candidate.mint, program=%candidate.program, "Attempting BUY for candidate");
+                        
+                        // Generate correlation ID for this buy attempt
+                        let correlation_id = CorrelationId::new();
+                        
+                        StructuredLogger::log_buy_attempt(
+                            &correlation_id,
+                            &candidate.mint.to_string(),
+                            &candidate.program,
+                            self.config.nonce_count,
+                        );
 
-                        match self.try_buy_with_guards(candidate.clone()).await {
+                        let start_time = std::time::Instant::now();
+                        match self.try_buy_with_guards(candidate.clone(), correlation_id.clone()).await {
                             Ok(sig) => {
+                                let latency_ms = start_time.elapsed().as_millis() as u64;
+                                let exec_price = self.get_execution_price_mock(&candidate).await;
+                                
+                                StructuredLogger::log_buy_success(
+                                    &correlation_id,
+                                    &candidate.mint.to_string(),
+                                    &sig.to_string(),
+                                    exec_price,
+                                    latency_ms,
+                                );
+                                
                                 info!(mint=%candidate.mint, sig=%sig, "BUY success, entering PassiveToken mode");
                                 self.backoff_state.record_success().await;
-
-                                let exec_price = self.get_execution_price_mock(&candidate).await;
 
                                 {
                                     let mut st = self.app_state.lock().await;
@@ -164,6 +185,17 @@ impl BuyEngine {
                                 info!(mint=%candidate.mint, price=%exec_price, "Recorded buy price and entered PassiveToken");
                             }
                             Err(e) => {
+                                let latency_ms = start_time.elapsed().as_millis() as u64;
+                                let failure_count = self.backoff_state.get_failure_count() + 1;
+                                
+                                StructuredLogger::log_buy_failure(
+                                    &correlation_id,
+                                    &candidate.mint.to_string(),
+                                    &e.to_string(),
+                                    latency_ms,
+                                    failure_count,
+                                );
+                                
                                 warn!(error=%e, "BUY attempt failed; staying in Sniffing");
                                 self.backoff_state.record_failure().await;
                             }
@@ -224,7 +256,7 @@ impl BuyEngine {
 
         let sell_tx = self.create_sell_transaction(&mint, pct).await?;
 
-        match self.rpc.send_on_many_rpc(vec![sell_tx]).await {
+        match self.rpc.send_on_many_rpc(vec![sell_tx], None).await {
             Ok(sig) => {
                 info!(mint=%mint, sig=%sig, "SELL broadcasted");
                 let mut st = self.app_state.lock().await;
@@ -245,7 +277,7 @@ impl BuyEngine {
     }
 
     /// Protected buy operation with atomic guards and proper lease management
-    async fn try_buy_with_guards(&self, candidate: PremintCandidate) -> Result<Signature> {
+    async fn try_buy_with_guards(&self, candidate: PremintCandidate, correlation_id: CorrelationId) -> Result<Signature> {
         // Set pending flag atomically
         if self.pending_buy.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed).is_err() {
             return Err(anyhow!("buy operation already in progress"));
@@ -285,7 +317,7 @@ impl BuyEngine {
 
         let result = self
             .rpc
-            .send_on_many_rpc(txs)
+            .send_on_many_rpc(txs, Some(correlation_id))
             .await
             .context("broadcast BUY failed");
 
@@ -375,6 +407,7 @@ mod tests {
         fn send_on_many_rpc<'a>(
             &'a self,
             _txs: Vec<VersionedTransaction>,
+            _correlation_id: Option<CorrelationId>,
         ) -> Pin<Box<dyn Future<Output = Result<Signature>> + Send + 'a>> {
             Box::pin(async { Ok(Signature::from([7u8; 64])) })
         }
@@ -452,6 +485,7 @@ mod tests {
             fn send_on_many_rpc<'a>(
                 &'a self,
                 _txs: Vec<VersionedTransaction>,
+                _correlation_id: Option<CorrelationId>,
             ) -> Pin<Box<dyn Future<Output = Result<Signature>> + Send + 'a>> {
                 Box::pin(async { Err(anyhow!("simulated failure")) })
             }
@@ -519,12 +553,14 @@ mod tests {
         };
 
         // First buy should succeed
-        let result1 = engine.try_buy_with_guards(candidate.clone()).await;
+        let correlation_id = CorrelationId::new();
+        let result1 = engine.try_buy_with_guards(candidate.clone(), correlation_id).await;
         assert!(result1.is_ok());
 
         // Immediate second buy should fail due to pending flag
         engine.pending_buy.store(true, Ordering::Relaxed);
-        let result2 = engine.try_buy_with_guards(candidate).await;
+        let correlation_id2 = CorrelationId::new();
+        let result2 = engine.try_buy_with_guards(candidate, correlation_id2).await;
         assert!(result2.is_err());
         assert!(result2.unwrap_err().to_string().contains("already in progress"));
     }
@@ -603,7 +639,8 @@ mod tests {
         };
 
         // Perform buy operation - should acquire and release nonces automatically
-        let result = engine.try_buy_with_guards(candidate).await;
+        let correlation_id = CorrelationId::new();
+        let result = engine.try_buy_with_guards(candidate, correlation_id).await;
         assert!(result.is_ok());
 
         // Give time for async cleanup

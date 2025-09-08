@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 use tokio::{sync::Mutex, task::JoinSet, time::timeout};
 use tracing::{debug, info, warn};
 
+use crate::observability::{CorrelationId, StructuredLogger};
+
 /// Broadcast mode enum defining different transaction broadcasting strategies
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -91,6 +93,7 @@ pub trait RpcBroadcaster: Send + Sync + std::fmt::Debug {
     fn send_on_many_rpc<'a>(
         &'a self,
         txs: Vec<VersionedTransaction>,
+        correlation_id: Option<CorrelationId>,
     ) -> Pin<Box<dyn Future<Output = Result<Signature>> + Send + 'a>>;
 }
 
@@ -172,6 +175,7 @@ impl RpcBroadcaster for RpcManager {
     fn send_on_many_rpc<'a>(
         &'a self,
         txs: Vec<VersionedTransaction>,
+        correlation_id: Option<CorrelationId>,
     ) -> Pin<Box<dyn Future<Output = Result<Signature>> + Send + 'a>> {
         Box::pin(async move {
             if self.endpoints.is_empty() || txs.is_empty() {
@@ -182,11 +186,13 @@ impl RpcBroadcaster for RpcManager {
                 ));
             }
 
+            let correlation_id = correlation_id.unwrap_or_default();
+
             match self.broadcast_mode {
-                BroadcastMode::Pairwise => self.broadcast_pairwise(txs).await,
-                BroadcastMode::ReplicateSingle => self.broadcast_replicate_single(txs).await,
-                BroadcastMode::RoundRobin => self.broadcast_round_robin(txs).await,
-                BroadcastMode::FullFanout => self.broadcast_full_fanout(txs).await,
+                BroadcastMode::Pairwise => self.broadcast_pairwise(txs, correlation_id).await,
+                BroadcastMode::ReplicateSingle => self.broadcast_replicate_single(txs, correlation_id).await,
+                BroadcastMode::RoundRobin => self.broadcast_round_robin(txs, correlation_id).await,
+                BroadcastMode::FullFanout => self.broadcast_full_fanout(txs, correlation_id).await,
             }
         })
     }
@@ -194,8 +200,15 @@ impl RpcBroadcaster for RpcManager {
 
 impl RpcManager {
     /// Pairwise broadcast: tx[0] -> endpoint[0], tx[1] -> endpoint[1], etc.
-    async fn broadcast_pairwise(&self, txs: Vec<VersionedTransaction>) -> Result<Signature> {
+    async fn broadcast_pairwise(&self, txs: Vec<VersionedTransaction>, correlation_id: CorrelationId) -> Result<Signature> {
         let n = self.endpoints.len().min(txs.len());
+        
+        StructuredLogger::log_rpc_broadcast(
+            &correlation_id,
+            "pairwise",
+            n,
+            n,
+        );
         
         info!("RpcManager: pairwise broadcast {} tx(s) across {} endpoint(s)", n, n);
         
@@ -206,9 +219,10 @@ impl RpcManager {
             let tx = txs[i].clone();
             let client = self.get_client(&endpoint).await;
             let metrics_recorder = Arc::clone(&self.metrics);
+            let corr_id = Some(correlation_id.clone());
 
             set.spawn(async move {
-                Self::send_single_tx(client, endpoint, tx, metrics_recorder).await
+                Self::send_single_tx(client, endpoint, tx, metrics_recorder, corr_id).await
             });
         }
 
@@ -216,7 +230,7 @@ impl RpcManager {
     }
 
     /// Replicate single transaction to all endpoints
-    async fn broadcast_replicate_single(&self, mut txs: Vec<VersionedTransaction>) -> Result<Signature> {
+    async fn broadcast_replicate_single(&self, mut txs: Vec<VersionedTransaction>, _correlation_id: CorrelationId) -> Result<Signature> {
         if txs.is_empty() {
             return Err(anyhow!("no transactions to replicate"));
         }
@@ -234,7 +248,7 @@ impl RpcManager {
             let metrics_recorder = Arc::clone(&self.metrics);
 
             set.spawn(async move {
-                Self::send_single_tx(client, endpoint, tx, metrics_recorder).await
+                Self::send_single_tx(client, endpoint, tx, metrics_recorder, None).await
             });
         }
 
@@ -242,7 +256,7 @@ impl RpcManager {
     }
 
     /// Round-robin distribution of transactions across endpoints
-    async fn broadcast_round_robin(&self, txs: Vec<VersionedTransaction>) -> Result<Signature> {
+    async fn broadcast_round_robin(&self, txs: Vec<VersionedTransaction>, _correlation_id: CorrelationId) -> Result<Signature> {
         info!("RpcManager: round-robin broadcast {} tx(s) across {} endpoint(s)", 
               txs.len(), self.endpoints.len());
         
@@ -255,7 +269,7 @@ impl RpcManager {
             let metrics_recorder = Arc::clone(&self.metrics);
 
             set.spawn(async move {
-                Self::send_single_tx(client, endpoint, tx, metrics_recorder).await
+                Self::send_single_tx(client, endpoint, tx, metrics_recorder, None).await
             });
         }
 
@@ -263,7 +277,7 @@ impl RpcManager {
     }
 
     /// Full fanout: send all transactions to all endpoints
-    async fn broadcast_full_fanout(&self, txs: Vec<VersionedTransaction>) -> Result<Signature> {
+    async fn broadcast_full_fanout(&self, txs: Vec<VersionedTransaction>, _correlation_id: CorrelationId) -> Result<Signature> {
         info!("RpcManager: full fanout {} tx(s) to {} endpoint(s) (total: {} sends)", 
               txs.len(), self.endpoints.len(), txs.len() * self.endpoints.len());
         
@@ -277,7 +291,7 @@ impl RpcManager {
                 let metrics_recorder = Arc::clone(&self.metrics);
 
                 set.spawn(async move {
-                    Self::send_single_tx(client, endpoint, tx, metrics_recorder).await
+                    Self::send_single_tx(client, endpoint, tx, metrics_recorder, None).await
                 });
             }
         }
@@ -291,6 +305,7 @@ impl RpcManager {
         endpoint: String,
         tx: VersionedTransaction,
         metrics: Arc<Mutex<HashMap<String, EndpointMetrics>>>,
+        correlation_id: Option<CorrelationId>,
     ) -> Result<Signature> {
         const SEND_TIMEOUT: Duration = Duration::from_secs(8);
         
@@ -309,6 +324,18 @@ impl RpcManager {
         match timeout(SEND_TIMEOUT, send_fut).await {
             Ok(Ok(sig)) => {
                 let latency = start.elapsed();
+                
+                if let Some(ref corr_id) = correlation_id {
+                    StructuredLogger::log_rpc_result(
+                        corr_id,
+                        &endpoint,
+                        true,
+                        latency,
+                        Some(&sig.to_string()),
+                        None,
+                    );
+                }
+                
                 info!("RpcManager: success on endpoint: {} sig={} latency={:?}", 
                       endpoint, sig, latency);
                 
@@ -322,6 +349,18 @@ impl RpcManager {
             }
             Ok(Err(e)) => {
                 let latency = start.elapsed();
+                
+                if let Some(ref corr_id) = correlation_id {
+                    StructuredLogger::log_rpc_result(
+                        corr_id,
+                        &endpoint,
+                        false,
+                        latency,
+                        None,
+                        Some(&e.to_string()),
+                    );
+                }
+                
                 warn!("RpcManager: endpoint send failed on {}: {} (latency={:?})", 
                       endpoint, e, latency);
                 
@@ -335,6 +374,18 @@ impl RpcManager {
             }
             Err(_elapsed) => {
                 let latency = start.elapsed();
+                
+                if let Some(ref corr_id) = correlation_id {
+                    StructuredLogger::log_rpc_result(
+                        corr_id,
+                        &endpoint,
+                        false,
+                        latency,
+                        None,
+                        Some("timeout"),
+                    );
+                }
+                
                 warn!("RpcManager: endpoint timed out on {} after {:?}", endpoint, SEND_TIMEOUT);
                 
                 // Record timeout as failure
@@ -436,11 +487,11 @@ mod tests {
     #[tokio::test] 
     async fn test_empty_inputs_handling() {
         let manager = RpcManager::new(vec![]);
-        let result = manager.send_on_many_rpc(vec![create_test_tx()]).await;
+        let result = manager.send_on_many_rpc(vec![create_test_tx()], None).await;
         assert!(result.is_err());
         
         let manager = RpcManager::new(vec!["http://test".to_string()]);
-        let result = manager.send_on_many_rpc(vec![]).await;
+        let result = manager.send_on_many_rpc(vec![], None).await;
         assert!(result.is_err());
     }
 
@@ -468,6 +519,7 @@ mod tests {
         fn send_on_many_rpc<'a>(
             &'a self,
             txs: Vec<VersionedTransaction>,
+            _correlation_id: Option<CorrelationId>,
         ) -> Pin<Box<dyn Future<Output = Result<Signature>> + Send + 'a>> {
             Box::pin(async move {
                 self.send_count.fetch_add(txs.len(), Ordering::Relaxed);

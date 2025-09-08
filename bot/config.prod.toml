@@ -1,0 +1,41 @@
+# Solana Sniffer Bot Production Configuration
+
+sniffer_mode = "real"  # Use "mock" for testing, "real" for production
+
+# Solana RPC Configuration
+rpc_endpoints = [
+    "https://api.mainnet-beta.solana.com",
+    "https://solana-api.projectserum.com",
+    "https://api.mainnet-beta.solana.com"
+]
+rpc_wss_endpoints = ["wss://api.mainnet-beta.solana.com"]
+
+# Wallet Configuration (IMPORTANT: Keep your keypair secure!)
+# Uncomment and set the path to your Solana keypair file
+# keypair_path = "/path/to/your/solana-keypair.json"
+
+# WebSocket Configuration
+wss_required = false
+wss_heartbeat_ms = 1500
+wss_reconnect_backoff_ms = 500
+wss_reconnect_backoff_max_ms = 10000
+wss_max_silent_ms = 5000
+
+# HTTP Fallback Configuration
+http_fallback_enabled = true
+http_poll_interval_ms = 1000
+http_sig_depth = 50
+http_max_parallel_tx_fetch = 6
+
+# Metadata Fetching
+meta_fetch_enabled = true
+meta_fetch_commitment = "confirmed"
+
+# Transaction Configuration
+nonce_count = 5  # Number of nonce accounts for parallel transactions
+gui_update_interval_ms = 200
+
+# Performance Notes:
+# - Lower poll intervals = faster detection but more RPC usage
+# - Higher nonce_count = more parallel transactions but more setup cost
+# - Use "confirmed" commitment for speed, "finalized" for safety

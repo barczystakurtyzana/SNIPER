@@ -14,7 +14,9 @@ use sniffer_bot_light::nonce_manager::NonceManager;
 use sniffer_bot_light::rpc_manager::{RpcBroadcaster, RpcManager};
 use sniffer_bot_light::sniffer;
 use sniffer_bot_light::sniffer::runner::SnifferRunner;
+use sniffer_bot_light::tx_builder::TransactionBuilder;
 use sniffer_bot_light::types::{AppState, CandidateReceiver, CandidateSender, Mode, ProgramLogEvent};
+use sniffer_bot_light::wallet::WalletManager;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -42,6 +44,25 @@ async fn main() -> anyhow::Result<()> {
     let rpc: Arc<dyn RpcBroadcaster> = prod.clone();
     let nonce_manager = Arc::new(NonceManager::new(cfg.nonce_count));
 
+    // Setup wallet and transaction builder if keypair is configured
+    let tx_builder = if let Some(keypair_path) = &cfg.keypair_path {
+        match WalletManager::from_file(keypair_path) {
+            Ok(wallet) => {
+                let primary_endpoint = cfg.rpc_endpoints.first()
+                    .unwrap_or(&"https://api.devnet.solana.com".to_string()).clone();
+                Some(TransactionBuilder::new(wallet, &primary_endpoint))
+            }
+            Err(e) => {
+                error!("Failed to load wallet from {}: {}", keypair_path, e);
+                info!("Continuing without transaction builder - will use placeholder transactions");
+                None
+            }
+        }
+    } else {
+        info!("No keypair configured, using placeholder transactions for testing");
+        None
+    };
+
     let engine_state = app_state.clone();
     let mut engine = BuyEngine {
         rpc: rpc.clone(),
@@ -49,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
         candidate_rx: cand_rx,
         app_state: engine_state,
         config: cfg.clone(),
+        tx_builder,
     };
 
     let sniffer_handle = match cfg.sniffer_mode {
@@ -85,6 +107,7 @@ async fn main() -> anyhow::Result<()> {
                     candidate_rx: rx,
                     app_state: self.state.clone(),
                     config: self.cfg.clone(),
+                    tx_builder: None, // No transaction builder needed for sell-only handle
                 };
                 engine.sell(percent).await?;
                 Ok(())

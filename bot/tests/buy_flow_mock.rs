@@ -82,6 +82,7 @@ async fn buy_first_success_pattern_and_state_transitions() {
             nonce_count: 2,
             ..Config::default()
         },
+        tx_builder: None, // No transaction builder for tests
     };
 
     let candidate = PremintCandidate {
@@ -110,6 +111,7 @@ async fn buy_first_success_pattern_and_state_transitions() {
         candidate_rx: stub_rx,
         app_state: app_state.clone(),
         config: Config::default(),
+        tx_builder: None, // No transaction builder for tests
     };
 
     engine_for_sell

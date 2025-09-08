@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
         mpsc::channel(256);
     let (gui_tx, mut gui_rx): (GuiEventSender, mpsc::Receiver<GuiEvent>) = mpsc::channel(64);
 
-    let prod = Arc::new(RpcManager::new(cfg.rpc_endpoints.clone()));
+    let prod = Arc::new(RpcManager::new_with_config(cfg.rpc_endpoints.clone(), cfg.clone()));
     let rpc: Arc<dyn RpcBroadcaster> = prod.clone();
     let nonce_manager = Arc::new(NonceManager::new(cfg.nonce_count));
 

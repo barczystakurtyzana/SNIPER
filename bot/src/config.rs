@@ -8,9 +8,28 @@ pub enum SnifferMode {
     Real,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BroadcastMode {
+    /// Strict 1:1 pairing (original behavior)
+    Pairwise,
+    /// Replicate best transaction to all endpoints
+    Replicate,
+    /// Round-robin transactions across endpoints
+    RoundRobin,
+    /// Full fanout - send all transactions to all endpoints
+    FullFanout,
+}
+
 impl Default for SnifferMode {
     fn default() -> Self {
         SnifferMode::Mock
+    }
+}
+
+impl Default for BroadcastMode {
+    fn default() -> Self {
+        BroadcastMode::Pairwise
     }
 }
 
@@ -34,6 +53,14 @@ pub struct Config {
     // Mode
     #[serde(default)]
     pub sniffer_mode: SnifferMode,
+
+    // RPC Broadcasting Configuration
+    #[serde(default)]
+    pub broadcast_mode: BroadcastMode,
+    #[serde(default = "default_rpc_timeout_sec")]
+    pub rpc_timeout_sec: u64,
+    #[serde(default = "default_early_cancel_threshold")]
+    pub early_cancel_threshold: usize,
 
     // Metadata fetch (Iteration 9)
     #[serde(default)]
@@ -73,6 +100,9 @@ impl Default for Config {
             nonce_count: default_nonce_count(),
             gui_update_interval_ms: default_gui_interval(),
             sniffer_mode: SnifferMode::Mock,
+            broadcast_mode: BroadcastMode::Pairwise,
+            rpc_timeout_sec: default_rpc_timeout_sec(),
+            early_cancel_threshold: default_early_cancel_threshold(),
             meta_fetch_enabled: false,
             meta_fetch_commitment: Some("confirmed".to_string()),
             wss_required: false,
@@ -130,6 +160,14 @@ fn default_http_sig_depth() -> usize {
 }
 fn default_http_max_parallel_tx_fetch() -> usize {
     6
+}
+
+// RPC Broadcasting defaults  
+fn default_rpc_timeout_sec() -> u64 {
+    8
+}
+fn default_early_cancel_threshold() -> usize {
+    2
 }
 
 impl Config {

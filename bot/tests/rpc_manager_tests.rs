@@ -1,5 +1,5 @@
 use sniffer_bot_light::rpc_manager::{RpcBroadcaster, RpcManager, RpcErrorType, classify_rpc_error};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use solana_client::client_error::{ClientError, ClientErrorKind};
 use solana_client::rpc_request::{RpcError, RpcResponseErrorData, RpcRequest};
 use solana_sdk::{

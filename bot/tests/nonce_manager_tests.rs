@@ -1,4 +1,4 @@
-use sniffer_bot_light::nonce_manager::{NonceManager, SlotLease};
+use sniffer_bot_light::nonce_manager::NonceManager;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;

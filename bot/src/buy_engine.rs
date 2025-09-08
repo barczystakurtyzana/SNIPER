@@ -11,11 +11,9 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use solana_sdk::{
-    message::Message,
     pubkey::Pubkey,
     signature::Signature,
-    system_instruction,
-    transaction::{Transaction, VersionedTransaction},
+    transaction::VersionedTransaction,
 };
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
@@ -186,7 +184,7 @@ impl BuyEngine {
 
         if txs.is_empty() {
             for idx in acquired_indices.drain(..) {
-                self.nonce_manager.release_nonce(idx);
+                let _ = self.nonce_manager.release_nonce(idx).await;
             }
             return Err(anyhow!("no transactions prepared (no nonces acquired)"));
         }
@@ -198,7 +196,7 @@ impl BuyEngine {
             .context("broadcast BUY failed");
 
         for idx in acquired_indices {
-            self.nonce_manager.release_nonce(idx);
+            let _ = self.nonce_manager.release_nonce(idx).await;
         }
 
         res
@@ -216,7 +214,14 @@ impl BuyEngine {
             }
             None => {
                 // Fallback to placeholder for testing/mock mode
-                Ok(Self::create_placeholder_tx(&candidate.mint, "buy"))
+                #[cfg(any(test, feature = "mock-mode"))]
+                {
+                    Ok(Self::create_placeholder_tx(&candidate.mint, "buy"))
+                }
+                #[cfg(not(any(test, feature = "mock-mode")))]
+                {
+                    Err(anyhow!("No transaction builder available in production mode"))
+                }
             }
         }
     }
@@ -233,12 +238,22 @@ impl BuyEngine {
             }
             None => {
                 // Fallback to placeholder for testing/mock mode
-                Ok(Self::create_placeholder_tx(mint, "sell"))
+                #[cfg(any(test, feature = "mock-mode"))]
+                {
+                    Ok(Self::create_placeholder_tx(mint, "sell"))
+                }
+                #[cfg(not(any(test, feature = "mock-mode")))]
+                {
+                    Err(anyhow!("No transaction builder available in production mode"))
+                }
             }
         }
     }
 
+    #[cfg(any(test, feature = "mock-mode"))]
     fn create_placeholder_tx(_token_mint: &Pubkey, _action: &str) -> VersionedTransaction {
+        use solana_sdk::{message::Message, system_instruction, transaction::Transaction};
+        
         let from = Pubkey::new_unique();
         let to = Pubkey::new_unique();
         let ix = system_instruction::transfer(&from, &to, 1);

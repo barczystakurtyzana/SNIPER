@@ -3,6 +3,10 @@ name = "sniffer_bot_light"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+mock-mode = []
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
@@ -11,6 +15,7 @@ itertools = "0.13"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "1"
 toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tracing = "0.1"

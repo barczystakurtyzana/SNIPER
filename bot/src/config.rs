@@ -151,6 +151,48 @@ impl Config {
             }
         }
 
+        cfg.validate().expect("Invalid configuration");
         cfg
+    }
+
+    /// Validate configuration consistency and constraints
+    pub fn validate(&self) -> Result<(), String> {
+        if self.nonce_count == 0 {
+            return Err("nonce_count must be greater than 0".to_string());
+        }
+        
+        if self.gui_update_interval_ms == 0 {
+            return Err("gui_update_interval_ms must be greater than 0".to_string());
+        }
+        
+        if self.wss_heartbeat_ms == 0 {
+            return Err("wss_heartbeat_ms must be greater than 0".to_string());
+        }
+        
+        if self.wss_reconnect_backoff_ms == 0 {
+            return Err("wss_reconnect_backoff_ms must be greater than 0".to_string());
+        }
+        
+        if self.wss_reconnect_backoff_max_ms == 0 {
+            return Err("wss_reconnect_backoff_max_ms must be greater than 0".to_string());
+        }
+        
+        if self.wss_max_silent_ms == 0 {
+            return Err("wss_max_silent_ms must be greater than 0".to_string());
+        }
+        
+        if self.http_poll_interval_ms == 0 {
+            return Err("http_poll_interval_ms must be greater than 0".to_string());
+        }
+        
+        if self.wss_reconnect_backoff_ms > self.wss_reconnect_backoff_max_ms {
+            return Err("wss_reconnect_backoff_ms cannot be greater than wss_reconnect_backoff_max_ms".to_string());
+        }
+        
+        if self.rpc_endpoints.is_empty() {
+            return Err("At least one RPC endpoint must be configured".to_string());
+        }
+        
+        Ok(())
     }
 }

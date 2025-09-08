@@ -39,6 +39,13 @@ pub struct CandidateBuffer {
 impl CandidateBuffer {
     /// Create a new buffer with given TTL and capacity.
     pub fn new(ttl: Duration, max_size: usize) -> Self {
+        let max_size = if max_size == 0 {
+            // Protect against max_size=0 which would cause infinite eviction loops
+            1
+        } else {
+            max_size
+        };
+        
         Self {
             map: HashMap::new(),
             ttl,
@@ -199,5 +206,42 @@ mod tests {
         assert!(!buf.map.contains_key(&c1.mint), "oldest should be evicted");
         assert!(buf.map.contains_key(&c2.mint));
         assert!(buf.map.contains_key(&c3.mint));
+    }
+
+    #[test]
+    fn ttl_zero_expires_immediately() {
+        let mut buf = CandidateBuffer::new(Duration::from_secs(0), 10);
+        let c = mk_candidate(1, 1);
+        
+        // With TTL=0, items should expire immediately during cleanup
+        assert!(buf.push(c));
+        assert_eq!(buf.map.len(), 1);
+        
+        // Calling cleanup should remove all items since TTL=0
+        let removed = buf.cleanup();
+        assert_eq!(removed, 1);
+        assert_eq!(buf.map.len(), 0);
+        
+        // pop_best should return None after cleanup
+        assert!(buf.pop_best().is_none());
+    }
+
+    #[test]
+    fn max_size_zero_protection() {
+        let mut buf = CandidateBuffer::new(Duration::from_secs(30), 0);
+        // Should have been adjusted to 1 to prevent infinite eviction loops
+        assert_eq!(buf.max_size, 1);
+        
+        let c1 = mk_candidate(1, 1);
+        let c2 = mk_candidate(2, 2);
+        
+        assert!(buf.push(c1.clone()));
+        assert_eq!(buf.map.len(), 1);
+        
+        // Pushing c2 should evict c1 since capacity is 1
+        assert!(buf.push(c2.clone()));
+        assert_eq!(buf.map.len(), 1);
+        assert!(!buf.map.contains_key(&c1.mint));
+        assert!(buf.map.contains_key(&c2.mint));
     }
 }

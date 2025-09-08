@@ -17,6 +17,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 fastrand = "2"
 bs58 = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
 
 # GUI
 eframe = { version = "0.27" }

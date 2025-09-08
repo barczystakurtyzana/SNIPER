@@ -45,11 +45,19 @@ impl NonceManager {
     }
 
     pub fn release_nonce(&self, idx: usize) {
-        let free = self.free.clone();
-        let sem = self.sem.clone();
-        tokio::spawn(async move {
-            free.lock().await.push_back(idx);
-            sem.add_permits(1);
-        });
+        // Remove the async spawn overhead by using blocking operations
+        // This assumes the calling context can handle potential blocking
+        if let Ok(mut guard) = self.free.try_lock() {
+            guard.push_back(idx);
+            self.sem.add_permits(1);
+        } else {
+            // Fallback to async spawn only if we can't get immediate lock
+            let free = self.free.clone();
+            let sem = self.sem.clone();
+            tokio::spawn(async move {
+                free.lock().await.push_back(idx);
+                sem.add_permits(1);
+            });
+        }
     }
 }

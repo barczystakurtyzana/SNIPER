@@ -166,14 +166,14 @@ impl RpcManager {
     }
 
     /// Check if error indicates all transactions are likely expired
-    fn is_fatal_error_type(error_msg: &str) -> bool {
+    pub fn is_fatal_error_type(error_msg: &str) -> bool {
         error_msg.contains("BlockhashNotFound")
             || error_msg.contains("TransactionExpired")
             || error_msg.contains("AlreadyProcessed")
     }
 
     /// Create tasks for pairwise broadcast mode (1:1 endpoint-tx pairing)
-    fn create_pairwise_tasks(
+    pub fn create_pairwise_tasks(
         &self, 
         txs: &[VersionedTransaction], 
         ranked_endpoints: &[usize]
@@ -185,7 +185,7 @@ impl RpcManager {
     }
 
     /// Create tasks for replicate mode (best tx to all endpoints)
-    fn create_replicate_tasks(
+    pub fn create_replicate_tasks(
         &self,
         txs: &[VersionedTransaction],
         ranked_endpoints: &[usize]
@@ -203,7 +203,7 @@ impl RpcManager {
     }
 
     /// Create tasks for round-robin mode 
-    fn create_round_robin_tasks(
+    pub fn create_round_robin_tasks(
         &self,
         txs: &[VersionedTransaction],
         ranked_endpoints: &[usize]
@@ -222,7 +222,7 @@ impl RpcManager {
     }
 
     /// Create tasks for full fanout mode (all txs to all endpoints)
-    fn create_fanout_tasks(
+    pub fn create_fanout_tasks(
         &self,
         txs: &[VersionedTransaction],
         ranked_endpoints: &[usize]

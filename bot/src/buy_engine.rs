@@ -171,7 +171,7 @@ impl BuyEngine {
         };
 
         for _ in 0..self.config.nonce_count {
-            match self.nonce_manager.acquire_nonce().await {
+            match self.nonce_manager.acquire_nonce_legacy().await {
                 Ok((_nonce_pubkey, idx)) => {
                     acquired_indices.push(idx);
                     let tx = self.create_buy_transaction(&candidate, recent_blockhash).await?;
@@ -186,7 +186,7 @@ impl BuyEngine {
 
         if txs.is_empty() {
             for idx in acquired_indices.drain(..) {
-                self.nonce_manager.release_nonce(idx);
+                self.nonce_manager.release_nonce(idx).await;
             }
             return Err(anyhow!("no transactions prepared (no nonces acquired)"));
         }
@@ -198,7 +198,7 @@ impl BuyEngine {
             .context("broadcast BUY failed");
 
         for idx in acquired_indices {
-            self.nonce_manager.release_nonce(idx);
+            self.nonce_manager.release_nonce(idx).await;
         }
 
         res

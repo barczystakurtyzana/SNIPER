@@ -22,6 +22,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 fastrand = "2"
 bs58 = "0.5"
+scopeguard = "1.2"
+uuid = { version = "1.0", features = ["v4"] }
 
 # GUI
 eframe = { version = "0.27" }

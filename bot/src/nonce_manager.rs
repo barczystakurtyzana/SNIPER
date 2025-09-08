@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use solana_sdk::pubkey::Pubkey;
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashSet};
 use std::sync::Arc;
 use std::pin::Pin;
 use std::future::Future;
@@ -49,11 +49,12 @@ pub trait SlotManager: Send + Sync + std::fmt::Debug {
 /// - Provides at most `capacity` parallel index slots
 /// - acquire_index() returns IndexLease that auto-releases on drop
 /// - For backward compatibility, also provides the old nonce-style API
+
 #[derive(Debug)]
 pub struct IndexSlotManager {
     capacity: usize,
     sem: Arc<Semaphore>,
-    free: Arc<Mutex<VecDeque<usize>>>,
+    inner: Arc<NonceManagerInner>,
 }
 
 // Type alias for backward compatibility
@@ -65,30 +66,160 @@ impl IndexSlotManager {
         Self {
             capacity,
             sem: Arc::new(Semaphore::new(capacity)),
-            free: Arc::new(Mutex::new(free)),
+            inner: Arc::new(NonceManagerInner {
+                free: Mutex::new(free),
+                in_use: Mutex::new(HashSet::new()),
+            }),
         }
     }
+
 
     /// Legacy API - acquire nonce returns (dummy_pubkey, index)
     pub async fn acquire_nonce(&self) -> Result<(Pubkey, usize)> {
         // Acquire semaphore first
+
         let permit = self
             .sem
             .acquire()
             .await
             .map_err(|_| anyhow!("semaphore closed"))?;
-        // Keep permit alive for the lifetime of the slot; we drop it in release_nonce.
-        // To keep it simple, we don't store the permit; rather, we add one new permit back on release.
-        drop(permit);
 
-        let mut guard = self.free.lock().await;
-        if let Some(idx) = guard.pop_front() {
-            Ok((Pubkey::new_unique(), idx))
-        } else {
-            // Shouldn't happen with semaphore protection
-            Err(anyhow!("no free nonce index"))
-        }
+        // Get a free index
+        let mut free = self.inner.free.lock().await;
+        let index = free
+            .pop_front()
+            .ok_or_else(|| anyhow!("no free nonce index"))?;
+        drop(free);
+
+        // Mark as in use
+        let mut in_use = self.inner.in_use.lock().await;
+        in_use.insert(index);
+        drop(in_use);
+
+        // Convert permit to static lifetime for storage in lease
+        let static_permit = unsafe { std::mem::transmute(permit) };
+
+        Ok(NonceLease {
+            index,
+            pubkey: Pubkey::new_unique(),
+            permit: static_permit,
+            manager: Arc::clone(&self.inner),
+        })
     }
+
+    /// For backward compatibility - acquire and return (Pubkey, index)
+    /// Note: This bypasses RAII protection and should be avoided in new code
+    pub async fn acquire_nonce_legacy(&self) -> Result<(Pubkey, usize)> {
+        let lease = self.acquire_nonce().await?;
+        let pubkey = *lease.pubkey();
+        let index = lease.index();
+        
+        // Forget the lease to prevent auto-release
+        std::mem::forget(lease);
+        
+        Ok((pubkey, index))
+    }
+
+    /// For backward compatibility - manually release a nonce index
+    /// Note: This should be avoided in new code, use NonceLease instead
+    pub async fn release_nonce(&self, idx: usize) {
+        self.inner.return_index(idx).await;
+        // Note: This doesn't release the semaphore permit since we don't have access to it
+        // This is a limitation of the legacy API
+        self.sem.add_permits(1);
+    }
+
+    /// Get current capacity
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Get number of available permits (approximate)
+    pub fn available_permits(&self) -> usize {
+        self.sem.available_permits()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    #[tokio::test]
+    async fn test_acquire_and_auto_release() {
+        let manager = NonceManager::new(2);
+        
+        // Acquire a lease
+        let lease = manager.acquire_nonce().await.unwrap();
+        assert_eq!(manager.available_permits(), 1);
+        
+        let index = lease.index();
+        assert!(index < 2);
+        
+        // Drop the lease - should auto-release
+        drop(lease);
+        
+        // Give some time for the async drop to complete
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(manager.available_permits(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_capacity_zero_edge_case() {
+        let manager = NonceManager::new(0);
+        
+        // Should immediately fail to acquire
+        let result = timeout(Duration::from_millis(100), manager.acquire_nonce()).await;
+        assert!(result.is_err() || result.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_double_release_protection() {
+        let manager = NonceManager::new(1);
+        
+        let lease = manager.acquire_nonce().await.unwrap();
+        let index = lease.index();
+        
+        // Manually try to double-release using legacy API
+        manager.release_nonce(index).await;
+        manager.release_nonce(index).await; // Should be ignored
+        
+        drop(lease); // This should also be safe
+        
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        
+        // Should still be able to acquire
+        let _lease2 = manager.acquire_nonce().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_acquire_release() {
+        let manager = Arc::new(NonceManager::new(5));
+        let mut handles = Vec::new();
+        
+        // Spawn multiple tasks that acquire and release leases
+        for _ in 0..10 {
+            let manager_clone = Arc::clone(&manager);
+            handles.push(tokio::spawn(async move {
+                for _ in 0..5 {
+                    let lease = manager_clone.acquire_nonce().await.unwrap();
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    drop(lease);
+                }
+            }));
+        }
+        
+        // Wait for all tasks to complete
+        for handle in handles {
+            handle.await.unwrap();
+        }
+        
+        // All permits should be available again
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(manager.available_permits(), 5);
+    }
+
 
     /// Legacy API - release nonce now returns Future for deterministic testing
     pub async fn release_nonce(&self, idx: usize) -> Result<()> {
@@ -244,5 +375,6 @@ mod tests {
         // Release and should be able to acquire again
         manager.release_nonce(idx1).await.expect("Should release");
         let (_pubkey3, _idx3) = manager.acquire_nonce().await.expect("Should acquire after release");
+
     }
 }

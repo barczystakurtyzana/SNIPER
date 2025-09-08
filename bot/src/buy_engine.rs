@@ -22,7 +22,7 @@ use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
-use crate::nonce_manager::NonceManager;
+use crate::nonce_manager::{NonceManager, SlotLease};
 use crate::rpc_manager::RpcBroadcaster;
 use crate::tx_builder::{TransactionBuilder, TransactionConfig};
 use crate::types::{AppState, CandidateReceiver, Mode, PremintCandidate};
@@ -153,7 +153,7 @@ impl BuyEngine {
     }
 
     async fn try_buy(&self, candidate: PremintCandidate) -> Result<Signature> {
-        let mut acquired_indices: Vec<usize> = Vec::new();
+        let mut acquired_leases: Vec<SlotLease> = Vec::new();
         let mut txs: Vec<VersionedTransaction> = Vec::new();
 
         // Get recent blockhash once for all transactions
@@ -172,10 +172,10 @@ impl BuyEngine {
 
         for _ in 0..self.config.nonce_count {
             match self.nonce_manager.acquire_nonce().await {
-                Ok((_nonce_pubkey, idx)) => {
-                    acquired_indices.push(idx);
+                Ok(lease) => {
                     let tx = self.create_buy_transaction(&candidate, recent_blockhash).await?;
                     txs.push(tx);
+                    acquired_leases.push(lease);
                 }
                 Err(e) => {
                     warn!(error=%e, "Failed to acquire nonce; proceeding with fewer");
@@ -185,9 +185,7 @@ impl BuyEngine {
         }
 
         if txs.is_empty() {
-            for idx in acquired_indices.drain(..) {
-                self.nonce_manager.release_nonce(idx);
-            }
+            // Leases will be automatically released when acquired_leases goes out of scope
             return Err(anyhow!("no transactions prepared (no nonces acquired)"));
         }
 
@@ -197,10 +195,7 @@ impl BuyEngine {
             .await
             .context("broadcast BUY failed");
 
-        for idx in acquired_indices {
-            self.nonce_manager.release_nonce(idx);
-        }
-
+        // Leases will be automatically released when acquired_leases goes out of scope
         res
     }
 

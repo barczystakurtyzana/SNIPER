@@ -1,6 +1,15 @@
-# Przykładowa konfiguracja
+# Example configuration for Solana Sniffer Bot
+# Copy to config.toml and customize for your setup
 
-sniffer_mode = "real"
+sniffer_mode = "mock"  # Use "mock" for testing, "real" for production
+
+# Solana RPC Configuration
+rpc_endpoints = ["https://api.mainnet-beta.solana.com"]
+rpc_wss_endpoints = ["wss://api.mainnet-beta.solana.com"]
+
+# Wallet Configuration (Required for real mode)
+# Uncomment and set the path to your Solana keypair JSON file
+# keypair_path = "/path/to/your/solana-keypair.json"
 
 # WSS watchdog + reconnect
 wss_required = false
@@ -18,10 +27,6 @@ http_max_parallel_tx_fetch = 6
 # Metadata backfill
 meta_fetch_enabled = true
 meta_fetch_commitment = "confirmed"
-
-# Endpoints
-rpc_endpoints = ["https://api.mainnet-beta.solana.com"]
-rpc_wss_endpoints = ["wss://api.mainnet-beta.solana.com"]
 
 # Engine/GUI
 nonce_count = 5

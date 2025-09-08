@@ -7,5 +7,7 @@ pub mod nonce_manager;
 pub mod buy_engine;
 pub mod sniffer;
 pub mod gui;
+pub mod wallet;
+pub mod tx_builder;
 
 

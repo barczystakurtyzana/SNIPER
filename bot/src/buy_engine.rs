@@ -24,15 +24,16 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::nonce_manager::NonceManager;
 use crate::rpc_manager::RpcBroadcaster;
+use crate::tx_builder::{TransactionBuilder, TransactionConfig};
 use crate::types::{AppState, CandidateReceiver, Mode, PremintCandidate};
 
-#[derive(Debug)]
 pub struct BuyEngine {
     pub rpc: Arc<dyn RpcBroadcaster>,
     pub nonce_manager: Arc<NonceManager>,
     pub candidate_rx: CandidateReceiver,
     pub app_state: Arc<Mutex<AppState>>,
     pub config: Config,
+    pub tx_builder: Option<TransactionBuilder>,
 }
 
 impl BuyEngine {
@@ -116,12 +117,12 @@ impl BuyEngine {
             }
         };
 
-        let candidate = candidate_opt.ok_or_else(|| anyhow!("no active token in AppState"))?;
+        let _candidate = candidate_opt.ok_or_else(|| anyhow!("no active token in AppState"))?;
         let new_holdings = (current_pct * (1.0 - pct)).max(0.0);
 
         info!(mint=%mint, sell_percent=pct, "Composing SELL transaction");
 
-        let sell_tx = Self::create_placeholder_tx(&candidate.mint, "sell");
+        let sell_tx = self.create_sell_transaction(&mint, pct).await?;
 
         match self.rpc.send_on_many_rpc(vec![sell_tx]).await {
             Ok(sig) => {
@@ -155,11 +156,25 @@ impl BuyEngine {
         let mut acquired_indices: Vec<usize> = Vec::new();
         let mut txs: Vec<VersionedTransaction> = Vec::new();
 
+        // Get recent blockhash once for all transactions
+        let recent_blockhash = match &self.tx_builder {
+            Some(builder) => {
+                // Try to get fresh blockhash, but don't fail if network is unavailable
+                match tokio::time::timeout(Duration::from_millis(2000), async {
+                    builder.rpc_client().get_latest_blockhash().await
+                }).await {
+                    Ok(Ok(hash)) => Some(hash),
+                    _ => None, // Use None to let tx_builder handle it
+                }
+            }
+            None => None,
+        };
+
         for _ in 0..self.config.nonce_count {
             match self.nonce_manager.acquire_nonce().await {
                 Ok((_nonce_pubkey, idx)) => {
                     acquired_indices.push(idx);
-                    let tx = Self::create_placeholder_tx(&candidate.mint, "buy");
+                    let tx = self.create_buy_transaction(&candidate, recent_blockhash).await?;
                     txs.push(tx);
                 }
                 Err(e) => {
@@ -187,6 +202,40 @@ impl BuyEngine {
         }
 
         res
+    }
+
+    async fn create_buy_transaction(
+        &self,
+        candidate: &PremintCandidate,
+        recent_blockhash: Option<solana_sdk::hash::Hash>,
+    ) -> Result<VersionedTransaction> {
+        match &self.tx_builder {
+            Some(builder) => {
+                let config = TransactionConfig::default();
+                builder.build_buy_transaction(candidate, &config, recent_blockhash).await
+            }
+            None => {
+                // Fallback to placeholder for testing/mock mode
+                Ok(Self::create_placeholder_tx(&candidate.mint, "buy"))
+            }
+        }
+    }
+
+    async fn create_sell_transaction(
+        &self,
+        mint: &Pubkey,
+        sell_percent: f64,
+    ) -> Result<VersionedTransaction> {
+        match &self.tx_builder {
+            Some(builder) => {
+                let config = TransactionConfig::default();
+                builder.build_sell_transaction(mint, sell_percent, &config, None).await
+            }
+            None => {
+                // Fallback to placeholder for testing/mock mode
+                Ok(Self::create_placeholder_tx(mint, "sell"))
+            }
+        }
     }
 
     fn create_placeholder_tx(_token_mint: &Pubkey, _action: &str) -> VersionedTransaction {
@@ -238,6 +287,7 @@ mod tests {
                 nonce_count: 1,
                 ..Config::default()
             },
+            tx_builder: None, // No transaction builder for tests
         };
 
         let candidate = PremintCandidate {

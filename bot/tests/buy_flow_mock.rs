@@ -73,17 +73,17 @@ async fn buy_first_success_pattern_and_state_transitions() {
 
     let rpc_buy: Arc<dyn RpcBroadcaster> = Arc::new(PatternBroadcaster::new(vec![false, true]));
 
-    let mut engine = BuyEngine {
-        rpc: rpc_buy.clone(),
-        nonce_manager: nonce_mgr.clone(),
-        candidate_rx: rx,
-        app_state: app_state.clone(),
-        config: Config {
+    let mut engine = BuyEngine::new(
+        rpc_buy.clone(),
+        nonce_mgr.clone(),
+        rx,
+        app_state.clone(),
+        Config {
             nonce_count: 2,
             ..Config::default()
         },
-        tx_builder: None, // No transaction builder for tests
-    };
+        None, // No transaction builder for tests
+    );
 
     let candidate = PremintCandidate {
         mint: Pubkey::new_unique(),
@@ -105,14 +105,14 @@ async fn buy_first_success_pattern_and_state_transitions() {
 
     let rpc_sell: Arc<dyn RpcBroadcaster> = Arc::new(AlwaysOk);
     let (_stub_tx, stub_rx) = mpsc::channel(1);
-    let engine_for_sell = BuyEngine {
-        rpc: rpc_sell.clone(),
-        nonce_manager: nonce_mgr.clone(),
-        candidate_rx: stub_rx,
-        app_state: app_state.clone(),
-        config: Config::default(),
-        tx_builder: None, // No transaction builder for tests
-    };
+    let engine_for_sell = BuyEngine::new(
+        rpc_sell.clone(),
+        nonce_mgr.clone(),
+        stub_rx,
+        app_state.clone(),
+        Config::default(),
+        None, // No transaction builder for tests
+    );
 
     engine_for_sell
         .sell(1.0)

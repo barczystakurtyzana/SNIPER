@@ -5098,6 +5098,7 @@ dependencies = [
  "futures",
  "itertools 0.13.0",
  "regex",
+ "scopeguard",
  "serde",
  "serde_json",
  "solana-client",

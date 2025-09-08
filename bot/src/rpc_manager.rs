@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
 use solana_client::{
     nonblocking::rpc_client::RpcClient,
     rpc_config::RpcSendTransactionConfig,
@@ -17,7 +18,8 @@ use tokio::{sync::Mutex, task::JoinSet, time::timeout};
 use tracing::{debug, info, warn};
 
 /// Broadcast mode enum defining different transaction broadcasting strategies
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BroadcastMode {
     /// Send transactions pairwise: tx[0] -> endpoint[0], tx[1] -> endpoint[1], etc.
     Pairwise,

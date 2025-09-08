@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use crate::rpc_manager::BroadcastMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -14,20 +15,7 @@ impl Default for SnifferMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BroadcastMode {
-    Pairwise,
-    ReplicateSingle,
-    RoundRobin,
-    FullFanout,
-}
 
-impl Default for BroadcastMode {
-    fn default() -> Self {
-        BroadcastMode::Pairwise
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {

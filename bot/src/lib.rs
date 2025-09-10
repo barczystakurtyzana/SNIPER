@@ -9,7 +9,10 @@ pub mod sniffer;
 pub mod gui;
 pub mod wallet;
 pub mod tx_builder;
-pub mod errors;
+pub mod metrics;
+pub mod structured_logging;
+pub mod security;
+pub mod endpoints;
 
 
 

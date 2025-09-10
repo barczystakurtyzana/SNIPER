@@ -19,8 +19,14 @@ use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 use crate::config::Config;
-use crate::nonce_manager::{NonceManager, SlotLease};
+
+use crate::endpoints::endpoint_server;
+use crate::metrics::{metrics, Timer};
+use crate::nonce_manager::NonceManager;
+
 use crate::rpc_manager::RpcBroadcaster;
+use crate::security::validator;
+use crate::structured_logging::PipelineContext;
 use crate::tx_builder::{TransactionBuilder, TransactionConfig};
 use crate::types::{AppState, CandidateReceiver, Mode, PremintCandidate};
 
@@ -130,33 +136,50 @@ impl BuyEngine {
 
                 match timeout(Duration::from_millis(1000), self.candidate_rx.recv()).await {
                     Ok(Some(candidate)) => {
+                        // Validate candidate for security issues
+                        let validation = validator().validate_candidate(&candidate);
+                        if !validation.is_valid() {
+                            metrics().increment_counter("buy_attempts_security_rejected");
+                            warn!(mint=%candidate.mint, issues=?validation.issues, "Candidate rejected due to security validation");
+                            continue;
+                        }
+
+                        // Check rate limiting to prevent spam
+                        if !validator().check_mint_rate_limit(&candidate.mint, 60, 5) {
+                            metrics().increment_counter("buy_attempts_rate_limited");
+                            debug!(mint=%candidate.mint, "Candidate rate limited");
+                            continue;
+                        }
+
                         if !self.is_candidate_interesting(&candidate) {
+                            metrics().increment_counter("buy_attempts_filtered");
                             debug!(mint=%candidate.mint, program=%candidate.program, "Candidate filtered out");
                             continue;
                         }
                         
-                        // Sanity check: ensure we're not already processing a buy
-                        if self.pending_buy.load(Ordering::Relaxed) {
-                            warn!("BuyEngine: skipping candidate due to pending buy operation");
-                            continue;
-                        }
 
-                        info!(mint=%candidate.mint, program=%candidate.program, "Attempting BUY for candidate");
+                        // Create pipeline context for correlation tracking
+                        let ctx = PipelineContext::new("buy_engine");
+                        ctx.logger.log_candidate_processed(&candidate.mint.to_string(), &candidate.program, true);
                         
-                        // Generate correlation ID for this buy attempt
-                        let correlation_id = CorrelationId::new();
-                        
-                        StructuredLogger::log_buy_attempt(
-                            &correlation_id,
-                            &candidate.mint.to_string(),
-                            &candidate.program,
-                            self.config.nonce_count,
-                        );
+                        info!(mint=%candidate.mint, program=%candidate.program, correlation_id=ctx.correlation_id, "Attempting BUY for candidate");
+                        metrics().increment_counter("buy_attempts_total");
 
-                        let start_time = std::time::Instant::now();
-                        match self.try_buy_with_guards(candidate.clone(), correlation_id.clone()).await {
+                        let buy_timer = Timer::new("buy_latency_seconds");
+                        match self.try_buy(candidate.clone(), ctx.clone()).await {
                             Ok(sig) => {
-                                let latency_ms = start_time.elapsed().as_millis() as u64;
+                                buy_timer.finish();
+                                let latency_ms = std::time::Instant::now().elapsed().as_millis() as u64;
+                                
+                                metrics().increment_counter("buy_success_total");
+                                ctx.logger.log_buy_success(&candidate.mint.to_string(), &sig.to_string(), latency_ms);
+                                
+                                // Update scoreboard
+                                endpoint_server().update_scoreboard(&candidate.mint.to_string(), &candidate.program, true, latency_ms).await;
+                                
+                                info!(mint=%candidate.mint, sig=%sig, correlation_id=ctx.correlation_id, "BUY success, entering PassiveToken mode");
+
+
                                 let exec_price = self.get_execution_price_mock(&candidate).await;
                                 
                                 StructuredLogger::log_buy_success(
@@ -181,19 +204,18 @@ impl BuyEngine {
                                 info!(mint=%candidate.mint, price=%exec_price, "Recorded buy price and entered PassiveToken");
                             }
                             Err(e) => {
-                                let latency_ms = start_time.elapsed().as_millis() as u64;
-                                let failure_count = self.backoff_state.get_failure_count() + 1;
+
+                                buy_timer.finish();
+                                let latency_ms = std::time::Instant::now().elapsed().as_millis() as u64;
                                 
-                                StructuredLogger::log_buy_failure(
-                                    &correlation_id,
-                                    &candidate.mint.to_string(),
-                                    &e.to_string(),
-                                    latency_ms,
-                                    failure_count,
-                                );
+                                metrics().increment_counter("buy_failure_total");
+                                ctx.logger.log_buy_failure(&candidate.mint.to_string(), &e.to_string(), latency_ms);
                                 
-                                warn!(error=%e, "BUY attempt failed; staying in Sniffing");
-                                self.backoff_state.record_failure().await;
+                                // Update scoreboard with failure
+                                endpoint_server().update_scoreboard(&candidate.mint.to_string(), &candidate.program, false, latency_ms).await;
+                                
+                                warn!(error=%e, correlation_id=ctx.correlation_id, "BUY attempt failed; staying in Sniffing");
+
                             }
                         }
                     }
@@ -224,7 +246,16 @@ impl BuyEngine {
     }
 
     pub async fn sell(&self, percent: f64) -> Result<()> {
-        let pct = percent.clamp(0.0, 1.0);
+        let ctx = PipelineContext::new("buy_engine_sell");
+
+        // Validate holdings percentage for overflow protection
+        let pct = match validator().validate_holdings_percent(percent.clamp(0.0, 1.0)) {
+            Ok(validated_pct) => validated_pct,
+            Err(e) => {
+                ctx.logger.error("Invalid sell percentage", serde_json::json!({"error": e, "percent": percent}));
+                return Err(anyhow!("Invalid sell percentage: {}", e));
+            }
+        };
 
         // Check if there's a pending buy operation
         if self.pending_buy.load(Ordering::Relaxed) {
@@ -240,25 +271,42 @@ impl BuyEngine {
         let mint = match mode {
             Mode::PassiveToken(m) => m,
             Mode::Sniffing => {
-                warn!("Sell requested in Sniffing mode; ignoring");
+                ctx.logger.warn("Sell requested in Sniffing mode; ignoring", serde_json::json!({"action": "sell_rejected"}));
+                warn!(correlation_id=ctx.correlation_id, "Sell requested in Sniffing mode; ignoring");
                 return Err(anyhow!("not in PassiveToken mode"));
             }
         };
 
         let _candidate = candidate_opt.ok_or_else(|| anyhow!("no active token in AppState"))?;
-        let new_holdings = (current_pct * (1.0 - pct)).max(0.0);
+        
+        // Validate the new holdings calculation
+        let new_holdings = match validator().validate_holdings_percent((current_pct * (1.0 - pct)).max(0.0)) {
+            Ok(validated_holdings) => validated_holdings,
+            Err(e) => {
+                ctx.logger.error("Holdings calculation overflow", serde_json::json!({"error": e, "current": current_pct, "sell": pct}));
+                return Err(anyhow!("Holdings calculation error: {}", e));
+            }
+        };
 
-        info!(mint=%mint, sell_percent=pct, "Composing SELL transaction");
+        ctx.logger.log_sell_operation(&mint.to_string(), pct, new_holdings);
+        info!(mint=%mint, sell_percent=pct, correlation_id=ctx.correlation_id, "Composing SELL transaction");
 
         let sell_tx = self.create_sell_transaction(&mint, pct).await?;
 
         match self.rpc.send_on_many_rpc(vec![sell_tx], None).await {
             Ok(sig) => {
-                info!(mint=%mint, sig=%sig, "SELL broadcasted");
+                // Check for duplicate signatures
+                let sig_str = sig.to_string();
+                if !validator().check_duplicate_signature(&sig_str) {
+                    warn!(mint=%mint, sig=%sig, correlation_id=ctx.correlation_id, "Duplicate signature detected for SELL");
+                    metrics().increment_counter("duplicate_signatures_detected");
+                }
+                
+                info!(mint=%mint, sig=%sig, correlation_id=ctx.correlation_id, "SELL broadcasted");
                 let mut st = self.app_state.lock().await;
                 st.holdings_percent = new_holdings;
                 if st.holdings_percent <= f64::EPSILON {
-                    info!(mint=%mint, "Sold 100%; returning to Sniffing mode");
+                    info!(mint=%mint, correlation_id=ctx.correlation_id, "Sold 100%; returning to Sniffing mode");
                     st.mode = Mode::Sniffing;
                     st.active_token = None;
                     st.last_buy_price = None;
@@ -266,7 +314,7 @@ impl BuyEngine {
                 Ok(())
             }
             Err(e) => {
-                error!(mint=%mint, error=%e, "SELL failed to broadcast");
+                error!(mint=%mint, error=%e, correlation_id=ctx.correlation_id, "SELL failed to broadcast");
                 Err(e)
             }
         }
@@ -285,8 +333,9 @@ impl BuyEngine {
         });
 
 
-    async fn try_buy(&self, candidate: PremintCandidate) -> Result<Signature> {
-        let mut acquired_leases: Vec<SlotLease> = Vec::new();
+
+    async fn try_buy(&self, candidate: PremintCandidate, ctx: PipelineContext) -> Result<Signature> {
+        let mut acquired_indices: Vec<usize> = Vec::new();
 
         let mut txs: Vec<VersionedTransaction> = Vec::new();
 
@@ -295,7 +344,11 @@ impl BuyEngine {
 
         for _ in 0..self.config.nonce_count {
             match self.nonce_manager.acquire_nonce().await {
-                Ok(lease) => {
+
+                Ok((_nonce_pubkey, idx)) => {
+                    ctx.logger.log_nonce_operation("acquire", Some(idx), true);
+                    acquired_indices.push(idx);
+
                     let tx = self.create_buy_transaction(&candidate, recent_blockhash).await?;
                     txs.push(tx);
 
@@ -303,7 +356,10 @@ impl BuyEngine {
 
                 }
                 Err(e) => {
-                    warn!(error=%e, "Failed to acquire nonce; proceeding with {} transactions", txs.len());
+
+                    ctx.logger.log_nonce_operation("acquire_failed", None, false);
+                    warn!(error=%e, correlation_id=ctx.correlation_id, "Failed to acquire nonce; proceeding with fewer");
+
                     break;
                 }
             }
@@ -313,16 +369,21 @@ impl BuyEngine {
 
 
             for idx in acquired_indices.drain(..) {
-                let _ = self.nonce_manager.release_nonce(idx).await;
+
+                ctx.logger.log_nonce_operation("release", Some(idx), true);
+                self.nonce_manager.release_nonce(idx);
+
             }
 
 
             return Err(anyhow!("no transactions prepared (no nonces acquired)"));
         }
 
-        info!("BuyEngine: attempting broadcast with {} transactions", txs.len());
 
-        let result = self
+        ctx.logger.log_buy_attempt(&candidate.mint.to_string(), txs.len());
+        
+        let res = self
+
             .rpc
             .send_on_many_rpc(txs, Some(correlation_id))
             .await
@@ -331,27 +392,10 @@ impl BuyEngine {
 
 
         for idx in acquired_indices {
-            let _ = self.nonce_manager.release_nonce(idx).await;
-        }
 
+            ctx.logger.log_nonce_operation("release", Some(idx), true);
+            self.nonce_manager.release_nonce(idx);
 
-    async fn get_execution_price_mock(&self, _candidate: &PremintCandidate) -> f64 {
-        1.0_f64
-    }
-
-    /// Get recent blockhash with timeout
-    async fn get_recent_blockhash(&self) -> Option<solana_sdk::hash::Hash> {
-        match &self.tx_builder {
-            Some(builder) => {
-                // Try to get fresh blockhash, but don't fail if network is unavailable
-                match tokio::time::timeout(Duration::from_millis(2000), async {
-                    builder.rpc_client().get_latest_blockhash().await
-                }).await {
-                    Ok(Ok(hash)) => Some(hash),
-                    _ => None, // Use None to let tx_builder handle it
-                }
-            }
-            None => None,
         }
 
     }

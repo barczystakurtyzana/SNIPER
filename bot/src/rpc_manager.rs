@@ -11,11 +11,11 @@ use solana_sdk::{
     signature::Signature,
     transaction::VersionedTransaction,
 };
-use std::collections::HashMap;
-use std::future::Future;
+
+use std::{collections::HashMap, future::Future, sync::Arc};
 use std::pin::Pin;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
 use tokio::{sync::RwLock, task::JoinSet, time::timeout};
 use tracing::{debug, info, warn};
 
@@ -91,14 +91,11 @@ pub trait RpcBroadcaster: Send + Sync + std::fmt::Debug {
 }
 
 
-/// Production RpcManager that broadcasts to multiple HTTP RPC endpoints.
-#[derive(Clone)]
+/// Production RpcManager that broadcasts to multiple HTTP RPC endpoints with connection pooling.
 pub struct RpcManager {
     pub endpoints: Vec<String>,
-    pub config: Config,
-    // Arc for shared access across async tasks
-    clients: Arc<RwLock<HashMap<String, Arc<RpcClient>>>>,
-    metrics: Arc<RwLock<HashMap<String, EndpointMetrics>>>,
+    // Connection pool to avoid recreating clients on every request
+    client_pool: Arc<RwLock<HashMap<String, Arc<RpcClient>>>>,
 
 }
 
@@ -107,9 +104,7 @@ impl std::fmt::Debug for RpcManager {
         f.debug_struct("RpcManager")
             .field("endpoints", &self.endpoints)
 
-            .field("config", &self.config)
-            .field("client_count", &"<cached_clients>")
-            .field("metrics_count", &"<endpoint_metrics>")
+            .field("client_pool_size", &"<pool>")
 
             .finish()
     }
@@ -118,143 +113,41 @@ impl std::fmt::Debug for RpcManager {
 impl RpcManager {
     pub fn new(endpoints: Vec<String>) -> Self {
 
-        Self::new_with_config(endpoints, Config::default())
-    }
-
-    pub fn new_with_config(endpoints: Vec<String>, config: Config) -> Self {
-        Self {
+        Self { 
             endpoints,
-            config,
-            clients: Arc::new(RwLock::new(HashMap::new())),
-            metrics: Arc::new(RwLock::new(HashMap::new())),
+            client_pool: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Get or create cached RpcClient for endpoint
-    pub async fn get_client(&self, endpoint: &str) -> Arc<RpcClient> {
-        let clients = self.clients.read().await;
-        if let Some(client) = clients.get(endpoint) {
-            return client.clone();
+    async fn get_or_create_client(&self, endpoint: &str, commitment: CommitmentConfig) -> Arc<RpcClient> {
+        // Try to get existing client first
+        {
+            let pool = self.client_pool.read().await;
+            if let Some(client) = pool.get(endpoint) {
+                return client.clone();
+            }
         }
-        drop(clients);
-
-        // Create new client
-        let commitment = CommitmentConfig {
-            commitment: CommitmentLevel::Confirmed,
-        };
-        let client = Arc::new(RpcClient::new_with_commitment(endpoint.to_string(), commitment));
         
-        let mut clients = self.clients.write().await;
-        clients.insert(endpoint.to_string(), client.clone());
+        // Create new client if not found
+        let client = Arc::new(RpcClient::new_with_commitment(endpoint.to_string(), commitment));
+        {
+            let mut pool = self.client_pool.write().await;
+            // Double-check pattern in case another task created it
+            if let Some(existing) = pool.get(endpoint) {
+                return existing.clone();
+            }
+            pool.insert(endpoint.to_string(), client.clone());
+        }
         client
     }
+}
 
-    /// Get sorted endpoint indices by performance (best first)
-    pub async fn get_ranked_endpoints(&self) -> Vec<usize> {
-        let metrics = self.metrics.read().await;
-        let mut ranked: Vec<(usize, f64)> = self
-            .endpoints
-            .iter()
-            .enumerate()
-            .map(|(i, endpoint)| {
-                let score = if let Some(m) = metrics.get(endpoint) {
-                    // Score = success_rate * (1000.0 / avg_latency_ms)
-                    // Higher success rate and lower latency = better score
-                    m.success_rate() * (1000.0 / (m.avg_latency_ms() + 100.0))
-                } else {
-                    1.0 // Default score for untracked endpoints
-                };
-                (i, score)
-            })
-            .collect();
-        
-        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        ranked.into_iter().map(|(i, _)| i).collect()
-    }
-
-    /// Record metrics for an endpoint
-    async fn record_metrics(&self, endpoint: &str, success: bool, latency_ms: Option<u64>) {
-        let mut metrics = self.metrics.write().await;
-        let entry = metrics.entry(endpoint.to_string()).or_insert_with(EndpointMetrics::new);
-        
-        if success {
-            if let Some(latency) = latency_ms {
-                entry.record_success(latency);
-            }
-        } else {
-            entry.record_error();
+impl Clone for RpcManager {
+    fn clone(&self) -> Self {
+        Self {
+            endpoints: self.endpoints.clone(),
+            client_pool: self.client_pool.clone(),
         }
-    }
-
-    /// Check if error indicates all transactions are likely expired
-    pub fn is_fatal_error_type(error_msg: &str) -> bool {
-        error_msg.contains("BlockhashNotFound")
-            || error_msg.contains("TransactionExpired")
-            || error_msg.contains("AlreadyProcessed")
-    }
-
-    /// Create tasks for pairwise broadcast mode (1:1 endpoint-tx pairing)
-    pub fn create_pairwise_tasks(
-        &self, 
-        txs: &[VersionedTransaction], 
-        ranked_endpoints: &[usize]
-    ) -> Vec<(usize, VersionedTransaction)> {
-        let n = self.endpoints.len().min(txs.len());
-        (0..n)
-            .map(|i| (ranked_endpoints[i], txs[i].clone()))
-            .collect()
-    }
-
-    /// Create tasks for replicate mode (best tx to all endpoints)
-    pub fn create_replicate_tasks(
-        &self,
-        txs: &[VersionedTransaction],
-        ranked_endpoints: &[usize]
-    ) -> Vec<(usize, VersionedTransaction)> {
-        if txs.is_empty() {
-            return Vec::new();
-        }
-        
-        // Use the first transaction (assumed to be the best/most important)
-        let best_tx = &txs[0];
-        ranked_endpoints
-            .iter()
-            .map(|&endpoint_idx| (endpoint_idx, best_tx.clone()))
-            .collect()
-    }
-
-    /// Create tasks for round-robin mode 
-    pub fn create_round_robin_tasks(
-        &self,
-        txs: &[VersionedTransaction],
-        ranked_endpoints: &[usize]
-    ) -> Vec<(usize, VersionedTransaction)> {
-        if ranked_endpoints.is_empty() {
-            return Vec::new();
-        }
-
-        txs.iter()
-            .enumerate()
-            .map(|(tx_idx, tx)| {
-                let endpoint_idx = ranked_endpoints[tx_idx % ranked_endpoints.len()];
-                (endpoint_idx, tx.clone())
-            })
-            .collect()
-    }
-
-    /// Create tasks for full fanout mode (all txs to all endpoints)
-    pub fn create_fanout_tasks(
-        &self,
-        txs: &[VersionedTransaction],
-        ranked_endpoints: &[usize]
-    ) -> Vec<(usize, VersionedTransaction)> {
-        let mut tasks = Vec::new();
-        for &endpoint_idx in ranked_endpoints {
-            for tx in txs {
-                tasks.push((endpoint_idx, tx.clone()));
-            }
-        }
-        tasks
 
     }
 }
@@ -304,17 +197,21 @@ impl RpcBroadcaster for RpcManager {
             let mut set: JoinSet<Result<Signature>> = JoinSet::new();
             let mut fatal_errors = 0;
 
-            // Spawn all tasks
-            for (endpoint_idx, tx) in tasks {
-                let endpoint = self.endpoints[endpoint_idx].clone();
-                let client = self.get_client(&endpoint).await;
-                let send_cfg = send_cfg.clone();
-                let timeout_duration = timeout_duration;
-                
-                // Clone self to access methods in the spawn
-                let self_clone = self.clone();
-                
+
+            for i in 0..n {
+                let endpoint = self.endpoints[i].clone();
+                let tx = txs[i].clone();
+                let client_pool = self.client_pool.clone();
+
                 set.spawn(async move {
+                    // Use the pooled client instead of creating a new one
+                    let rpc_manager = RpcManager {
+                        endpoints: vec![endpoint.clone()],
+                        client_pool,
+                    };
+                    let rpc = rpc_manager.get_or_create_client(&endpoint, commitment).await;
+                    debug!("RpcManager: sending tx on endpoint[{}]: {}", i, endpoint);
+
 
                     let start_time = Instant::now();
                     debug!("RpcManager: sending tx on endpoint: {}", endpoint);

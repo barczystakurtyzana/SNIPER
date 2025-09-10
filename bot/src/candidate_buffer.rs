@@ -17,23 +17,28 @@
 //! - If the buffer is full on push, the oldest entry is evicted to make room.
 
 use crate::types::PremintCandidate;
+use crate::metrics::metrics;
 use solana_sdk::pubkey::Pubkey;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
 
-/// In-memory candidate buffer.
+/// In-memory candidate buffer with optimized O(1) operations.
 #[derive(Debug)]
 pub struct CandidateBuffer {
-    /// Map by mint pubkey; value holds the candidate and the insertion Instant.
-    pub map: HashMap<Pubkey, (PremintCandidate, Instant)>,
+    /// Map by mint pubkey; value holds the candidate, insertion time, and sequence number.
+    pub map: HashMap<Pubkey, (PremintCandidate, Instant, u64)>,
+    /// Insertion order tracking with sequence numbers for O(1) oldest lookup.
+    pub insertion_order: VecDeque<(Pubkey, u64)>,
     /// Time-to-live for each entry.
     pub ttl: Duration,
     /// Maximum number of entries to store; oldest will be evicted when full.
     pub max_size: usize,
+    /// Sequence counter for insertion order tracking.
+    sequence: u64,
 }
 
 impl CandidateBuffer {
@@ -48,8 +53,10 @@ impl CandidateBuffer {
         
         Self {
             map: HashMap::new(),
+            insertion_order: VecDeque::new(),
             ttl,
             max_size,
+            sequence: 0,
         }
     }
 
@@ -60,22 +67,30 @@ impl CandidateBuffer {
         let _ = self.cleanup();
 
         if self.map.contains_key(&c.mint) {
+            metrics().increment_counter("candidate_buffer_duplicates_total");
             return false;
         }
 
         // Enforce capacity by evicting the oldest if at capacity.
         if self.map.len() >= self.max_size && self.max_size > 0 {
-            if let Some((oldest_key, _)) = self
-                .map
-                .iter()
-                .min_by_key(|(_, (_cand, seen_at))| *seen_at)
-                .map(|(k, v)| (*k, v.1))
-            {
+            if let Some((oldest_key, _seq)) = self.insertion_order.front().cloned() {
                 self.map.remove(&oldest_key);
+                self.insertion_order.pop_front();
+                metrics().increment_counter("candidate_dropped_due_capacity_total");
             }
         }
 
-        self.map.insert(c.mint, (c, Instant::now()));
+        // Insert with new sequence number
+        self.sequence += 1;
+        let seq = self.sequence;
+        let mint = c.mint;
+        self.map.insert(mint, (c, Instant::now(), seq));
+        self.insertion_order.push_back((mint, seq));
+        
+        // Update metrics
+        metrics().set_gauge("candidate_buffer_size", self.map.len() as u64);
+        metrics().increment_counter("candidate_buffer_inserts_total");
+        
         true
     }
 
@@ -85,14 +100,20 @@ impl CandidateBuffer {
         // Remove expired first.
         let _ = self.cleanup();
 
-        // Pick the oldest entry.
-        let oldest_key = self
-            .map
-            .iter()
-            .min_by_key(|(_, (_cand, seen_at))| *seen_at)
-            .map(|(k, _)| *k)?;
-
-        self.map.remove(&oldest_key).map(|(cand, _)| cand)
+        // Get the oldest entry from front of insertion order
+        while let Some((oldest_key, seq)) = self.insertion_order.pop_front() {
+            if let Some((cand, _time, stored_seq)) = self.map.remove(&oldest_key) {
+                // Verify sequence matches to handle cleanup race conditions
+                if stored_seq == seq {
+                    metrics().set_gauge("candidate_buffer_size", self.map.len() as u64);
+                    return Some(cand);
+                }
+            }
+            // If sequence doesn't match, the entry was already removed, try next
+        }
+        
+        metrics().set_gauge("candidate_buffer_size", self.map.len() as u64);
+        None
     }
 
     /// Remove expired entries according to TTL.
@@ -102,13 +123,36 @@ impl CandidateBuffer {
             // If TTL is zero, expire everything immediately.
             let removed = self.map.len();
             self.map.clear();
+            self.insertion_order.clear();
+            metrics().add_to_counter("candidate_dropped_due_ttl_total", removed as u64);
+            metrics().set_gauge("candidate_buffer_size", 0);
             return removed;
         }
         let now = Instant::now();
         let before = self.map.len();
-        self.map
-            .retain(|_, (_cand, seen_at)| now.duration_since(*seen_at) < self.ttl);
-        before.saturating_sub(self.map.len())
+        
+        // Remove expired entries from map and update insertion order
+        let expired_keys: Vec<Pubkey> = self
+            .map
+            .iter()
+            .filter(|(_, (_, seen_at, _))| now.duration_since(*seen_at) >= self.ttl)
+            .map(|(k, _)| *k)
+            .collect();
+            
+        for key in &expired_keys {
+            self.map.remove(key);
+        }
+        
+        // Remove expired entries from insertion order
+        self.insertion_order.retain(|(key, _seq)| !expired_keys.contains(key));
+        
+        let removed = before.saturating_sub(self.map.len());
+        if removed > 0 {
+            metrics().add_to_counter("candidate_dropped_due_ttl_total", removed as u64);
+            metrics().set_gauge("candidate_buffer_size", self.map.len() as u64);
+        }
+        
+        removed
     }
 }
 

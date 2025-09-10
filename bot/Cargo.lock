@@ -5105,6 +5105,7 @@ dependencies = [
  "solana-sdk",
  "solana-transaction-status",
  "tempfile",
+ "thiserror",
  "tokio",
  "toml 0.8.23",
  "tracing",

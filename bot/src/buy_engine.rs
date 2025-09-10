@@ -11,11 +11,9 @@ use std::{sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}}, time::{Duratio
 
 use anyhow::{anyhow, Context, Result};
 use solana_sdk::{
-    message::Message,
     pubkey::Pubkey,
     signature::Signature,
-    system_instruction,
-    transaction::{Transaction, VersionedTransaction},
+    transaction::VersionedTransaction,
 };
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
@@ -313,7 +311,11 @@ impl BuyEngine {
 
         if txs.is_empty() {
 
-            // Leases will be automatically released when acquired_leases goes out of scope
+
+            for idx in acquired_indices.drain(..) {
+                let _ = self.nonce_manager.release_nonce(idx).await;
+            }
+
 
             return Err(anyhow!("no transactions prepared (no nonces acquired)"));
         }
@@ -327,8 +329,30 @@ impl BuyEngine {
             .context("broadcast BUY failed");
 
 
-        // Leases will be automatically released when acquired_leases goes out of scope
-        res
+
+        for idx in acquired_indices {
+            let _ = self.nonce_manager.release_nonce(idx).await;
+        }
+
+
+    async fn get_execution_price_mock(&self, _candidate: &PremintCandidate) -> f64 {
+        1.0_f64
+    }
+
+    /// Get recent blockhash with timeout
+    async fn get_recent_blockhash(&self) -> Option<solana_sdk::hash::Hash> {
+        match &self.tx_builder {
+            Some(builder) => {
+                // Try to get fresh blockhash, but don't fail if network is unavailable
+                match tokio::time::timeout(Duration::from_millis(2000), async {
+                    builder.rpc_client().get_latest_blockhash().await
+                }).await {
+                    Ok(Ok(hash)) => Some(hash),
+                    _ => None, // Use None to let tx_builder handle it
+                }
+            }
+            None => None,
+        }
 
     }
 
@@ -344,7 +368,14 @@ impl BuyEngine {
             }
             None => {
                 // Fallback to placeholder for testing/mock mode
-                Ok(Self::create_placeholder_tx(&candidate.mint, "buy"))
+                #[cfg(any(test, feature = "mock-mode"))]
+                {
+                    Ok(Self::create_placeholder_tx(&candidate.mint, "buy"))
+                }
+                #[cfg(not(any(test, feature = "mock-mode")))]
+                {
+                    Err(anyhow!("No transaction builder available in production mode"))
+                }
             }
         }
     }
@@ -361,12 +392,22 @@ impl BuyEngine {
             }
             None => {
                 // Fallback to placeholder for testing/mock mode
-                Ok(Self::create_placeholder_tx(mint, "sell"))
+                #[cfg(any(test, feature = "mock-mode"))]
+                {
+                    Ok(Self::create_placeholder_tx(mint, "sell"))
+                }
+                #[cfg(not(any(test, feature = "mock-mode")))]
+                {
+                    Err(anyhow!("No transaction builder available in production mode"))
+                }
             }
         }
     }
 
+    #[cfg(any(test, feature = "mock-mode"))]
     fn create_placeholder_tx(_token_mint: &Pubkey, _action: &str) -> VersionedTransaction {
+        use solana_sdk::{message::Message, system_instruction, transaction::Transaction};
+        
         let from = Pubkey::new_unique();
         let to = Pubkey::new_unique();
         let ix = system_instruction::transfer(&from, &to, 1);

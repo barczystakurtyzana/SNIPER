@@ -1,4 +1,8 @@
 use solana_sdk::pubkey::Pubkey;
+use solana_sdk::transaction::VersionedTransaction;
+use solana_sdk::message::{v0, VersionedMessage};
+use solana_sdk::instruction::Instruction;
+use solana_sdk::hash::Hash;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
@@ -40,4 +44,20 @@ pub struct ProgramLogEvent {
     pub program: String,
     pub logs: Vec<String>,
     pub ts_ms: u64,
+}
+
+/// Helper function to create a simple versioned transaction for testing
+pub fn create_versioned_transaction(
+    instructions: Vec<Instruction>,
+    payer: &Pubkey,
+    blockhash: Hash,
+    _priority_fee: u64,
+) -> VersionedTransaction {
+    let message = v0::Message::try_compile(payer, &instructions, &[], blockhash)
+        .expect("Failed to compile message");
+    
+    VersionedTransaction {
+        signatures: vec![solana_sdk::signature::Signature::default()],
+        message: VersionedMessage::V0(message),
+    }
 }

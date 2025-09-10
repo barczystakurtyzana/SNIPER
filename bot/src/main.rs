@@ -40,7 +40,8 @@ async fn main() -> anyhow::Result<()> {
         mpsc::channel(256);
     let (gui_tx, mut gui_rx): (GuiEventSender, mpsc::Receiver<GuiEvent>) = mpsc::channel(64);
 
-    let prod = Arc::new(RpcManager::new(cfg.rpc_endpoints.clone()));
+
+    let prod = Arc::new(RpcManager::new_with_config(cfg.rpc_endpoints.clone(), cfg.clone()));
     let rpc: Arc<dyn RpcBroadcaster> = prod.clone();
     let nonce_manager = Arc::new(NonceManager::new(cfg.nonce_count));
 
@@ -64,14 +65,14 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let engine_state = app_state.clone();
-    let mut engine = BuyEngine {
-        rpc: rpc.clone(),
-        nonce_manager: nonce_manager.clone(),
-        candidate_rx: cand_rx,
-        app_state: engine_state,
-        config: cfg.clone(),
+    let mut engine = BuyEngine::new(
+        rpc.clone(),
+        nonce_manager.clone(),
+        cand_rx,
+        engine_state,
+        cfg.clone(),
         tx_builder,
-    };
+    );
 
     let sniffer_handle = match cfg.sniffer_mode {
         SnifferMode::Mock => {
@@ -101,14 +102,14 @@ async fn main() -> anyhow::Result<()> {
         impl SellHandle {
             async fn sell(&self, percent: f64) -> anyhow::Result<()> {
                 let (_tx, rx) = mpsc::channel(1);
-                let engine = BuyEngine {
-                    rpc: self.rpc.clone(),
-                    nonce_manager: self.nonce.clone(),
-                    candidate_rx: rx,
-                    app_state: self.state.clone(),
-                    config: self.cfg.clone(),
-                    tx_builder: None, // No transaction builder needed for sell-only handle
-                };
+                let engine = BuyEngine::new(
+                    self.rpc.clone(),
+                    self.nonce.clone(),
+                    rx,
+                    self.state.clone(),
+                    self.cfg.clone(),
+                    None, // No transaction builder needed for sell-only handle
+                );
                 engine.sell(percent).await?;
                 Ok(())
             }

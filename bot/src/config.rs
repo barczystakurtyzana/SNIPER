@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use crate::rpc_manager::BroadcastMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -8,11 +9,32 @@ pub enum SnifferMode {
     Real,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BroadcastMode {
+    /// Strict 1:1 pairing (original behavior)
+    Pairwise,
+    /// Replicate best transaction to all endpoints
+    Replicate,
+    /// Round-robin transactions across endpoints
+    RoundRobin,
+    /// Full fanout - send all transactions to all endpoints
+    FullFanout,
+}
+
 impl Default for SnifferMode {
     fn default() -> Self {
         SnifferMode::Mock
     }
 }
+
+
+impl Default for BroadcastMode {
+    fn default() -> Self {
+        BroadcastMode::Pairwise
+    }
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -34,6 +56,22 @@ pub struct Config {
     // Mode
     #[serde(default)]
     pub sniffer_mode: SnifferMode,
+    
+    // Broadcast configuration
+    #[serde(default)]
+    pub broadcast_mode: BroadcastMode,
+    #[serde(default = "default_rpc_timeout_secs")]
+    pub rpc_timeout_secs: u64,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+
+    // RPC Broadcasting Configuration
+    #[serde(default)]
+    pub broadcast_mode: BroadcastMode,
+    #[serde(default = "default_rpc_timeout_sec")]
+    pub rpc_timeout_sec: u64,
+    #[serde(default = "default_early_cancel_threshold")]
+    pub early_cancel_threshold: usize,
 
     // Metadata fetch (Iteration 9)
     #[serde(default)]
@@ -73,6 +111,10 @@ impl Default for Config {
             nonce_count: default_nonce_count(),
             gui_update_interval_ms: default_gui_interval(),
             sniffer_mode: SnifferMode::Mock,
+            broadcast_mode: BroadcastMode::Pairwise,
+            rpc_timeout_sec: default_rpc_timeout_sec(),
+            early_cancel_threshold: default_early_cancel_threshold(),
+
             meta_fetch_enabled: false,
             meta_fetch_commitment: Some("confirmed".to_string()),
             wss_required: false,
@@ -99,6 +141,12 @@ fn default_nonce_count() -> usize {
 }
 fn default_gui_interval() -> u64 {
     200
+}
+fn default_rpc_timeout_secs() -> u64 {
+    8
+}
+fn default_max_retries() -> u32 {
+    3
 }
 
 // WSS defaults
@@ -132,6 +180,14 @@ fn default_http_max_parallel_tx_fetch() -> usize {
     6
 }
 
+// RPC Broadcasting defaults  
+fn default_rpc_timeout_sec() -> u64 {
+    8
+}
+fn default_early_cancel_threshold() -> usize {
+    2
+}
+
 impl Config {
     /// Load configuration from "config.toml" if present, otherwise return defaults.
     /// Applies ENV override with highest priority for sniffer mode:
@@ -151,6 +207,48 @@ impl Config {
             }
         }
 
+        cfg.validate().expect("Invalid configuration");
         cfg
+    }
+
+    /// Validate configuration consistency and constraints
+    pub fn validate(&self) -> Result<(), String> {
+        if self.nonce_count == 0 {
+            return Err("nonce_count must be greater than 0".to_string());
+        }
+        
+        if self.gui_update_interval_ms == 0 {
+            return Err("gui_update_interval_ms must be greater than 0".to_string());
+        }
+        
+        if self.wss_heartbeat_ms == 0 {
+            return Err("wss_heartbeat_ms must be greater than 0".to_string());
+        }
+        
+        if self.wss_reconnect_backoff_ms == 0 {
+            return Err("wss_reconnect_backoff_ms must be greater than 0".to_string());
+        }
+        
+        if self.wss_reconnect_backoff_max_ms == 0 {
+            return Err("wss_reconnect_backoff_max_ms must be greater than 0".to_string());
+        }
+        
+        if self.wss_max_silent_ms == 0 {
+            return Err("wss_max_silent_ms must be greater than 0".to_string());
+        }
+        
+        if self.http_poll_interval_ms == 0 {
+            return Err("http_poll_interval_ms must be greater than 0".to_string());
+        }
+        
+        if self.wss_reconnect_backoff_ms > self.wss_reconnect_backoff_max_ms {
+            return Err("wss_reconnect_backoff_ms cannot be greater than wss_reconnect_backoff_max_ms".to_string());
+        }
+        
+        if self.rpc_endpoints.is_empty() {
+            return Err("At least one RPC endpoint must be configured".to_string());
+        }
+        
+        Ok(())
     }
 }

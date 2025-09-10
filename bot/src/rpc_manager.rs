@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
 use solana_client::{
     nonblocking::rpc_client::RpcClient,
     rpc_config::RpcSendTransactionConfig,
@@ -62,6 +63,7 @@ impl EndpointMetrics {
 
     fn record_error(&mut self) {
         self.error_count += 1;
+
     }
 }
 
@@ -71,8 +73,10 @@ pub trait RpcBroadcaster: Send + Sync + std::fmt::Debug {
     fn send_on_many_rpc<'a>(
         &'a self,
         txs: Vec<VersionedTransaction>,
+        correlation_id: Option<CorrelationId>,
     ) -> Pin<Box<dyn Future<Output = Result<Signature>> + Send + 'a>>;
 }
+
 
 /// Production RpcManager that broadcasts to multiple HTTP RPC endpoints.
 #[derive(Clone)]
@@ -82,21 +86,25 @@ pub struct RpcManager {
     // Arc for shared access across async tasks
     clients: Arc<RwLock<HashMap<String, Arc<RpcClient>>>>,
     metrics: Arc<RwLock<HashMap<String, EndpointMetrics>>>,
+
 }
 
 impl std::fmt::Debug for RpcManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RpcManager")
             .field("endpoints", &self.endpoints)
+
             .field("config", &self.config)
             .field("client_count", &"<cached_clients>")
             .field("metrics_count", &"<endpoint_metrics>")
+
             .finish()
     }
 }
 
 impl RpcManager {
     pub fn new(endpoints: Vec<String>) -> Self {
+
         Self::new_with_config(endpoints, Config::default())
     }
 
@@ -234,6 +242,7 @@ impl RpcManager {
             }
         }
         tasks
+
     }
 }
 
@@ -241,6 +250,7 @@ impl RpcBroadcaster for RpcManager {
     fn send_on_many_rpc<'a>(
         &'a self,
         txs: Vec<VersionedTransaction>,
+        correlation_id: Option<CorrelationId>,
     ) -> Pin<Box<dyn Future<Output = Result<Signature>> + Send + 'a>> {
         Box::pin(async move {
             if self.endpoints.is_empty() || txs.is_empty() {
@@ -250,6 +260,7 @@ impl RpcBroadcaster for RpcManager {
                     txs.len()
                 ));
             }
+
 
             let timeout_duration = Duration::from_secs(self.config.rpc_timeout_sec);
             
@@ -323,8 +334,114 @@ impl RpcBroadcaster for RpcManager {
                             Err(anyhow!("RPC send timeout"))
                         }
                     }
+
                 });
             }
+        }
+
+        Self::wait_for_first_success(set).await
+    }
+
+    /// Send a single transaction and record metrics
+    async fn send_single_tx(
+        client: Arc<RpcClient>,
+        endpoint: String,
+        tx: VersionedTransaction,
+        metrics: Arc<Mutex<HashMap<String, EndpointMetrics>>>,
+        correlation_id: Option<CorrelationId>,
+    ) -> Result<Signature> {
+        const SEND_TIMEOUT: Duration = Duration::from_secs(8);
+        
+        let send_cfg = RpcSendTransactionConfig {
+            skip_preflight: true,
+            preflight_commitment: Some(CommitmentLevel::Processed),
+            max_retries: Some(3),
+            ..Default::default()
+        };
+
+        debug!("RpcManager: sending tx to endpoint: {}", endpoint);
+        
+        let start = Instant::now();
+        let send_fut = client.send_transaction_with_config(&tx, send_cfg);
+        
+        match timeout(SEND_TIMEOUT, send_fut).await {
+            Ok(Ok(sig)) => {
+                let latency = start.elapsed();
+                
+                if let Some(ref corr_id) = correlation_id {
+                    StructuredLogger::log_rpc_result(
+                        corr_id,
+                        &endpoint,
+                        true,
+                        latency,
+                        Some(&sig.to_string()),
+                        None,
+                    );
+                }
+                
+                info!("RpcManager: success on endpoint: {} sig={} latency={:?}", 
+                      endpoint, sig, latency);
+                
+                // Record success metrics
+                let mut metrics_guard = metrics.lock().await;
+                if let Some(endpoint_metrics) = metrics_guard.get_mut(&endpoint) {
+                    endpoint_metrics.record_success(latency);
+                }
+                
+                Ok(sig)
+            }
+            Ok(Err(e)) => {
+                let latency = start.elapsed();
+                
+                if let Some(ref corr_id) = correlation_id {
+                    StructuredLogger::log_rpc_result(
+                        corr_id,
+                        &endpoint,
+                        false,
+                        latency,
+                        None,
+                        Some(&e.to_string()),
+                    );
+                }
+                
+                warn!("RpcManager: endpoint send failed on {}: {} (latency={:?})", 
+                      endpoint, e, latency);
+                
+                // Record failure metrics
+                let mut metrics_guard = metrics.lock().await;
+                if let Some(endpoint_metrics) = metrics_guard.get_mut(&endpoint) {
+                    endpoint_metrics.record_failure();
+                }
+                
+                Err(anyhow!(e).context("RPC send_transaction_with_config failed"))
+            }
+            Err(_elapsed) => {
+                let latency = start.elapsed();
+                
+                if let Some(ref corr_id) = correlation_id {
+                    StructuredLogger::log_rpc_result(
+                        corr_id,
+                        &endpoint,
+                        false,
+                        latency,
+                        None,
+                        Some("timeout"),
+                    );
+                }
+                
+                warn!("RpcManager: endpoint timed out on {} after {:?}", endpoint, SEND_TIMEOUT);
+                
+                // Record timeout as failure
+                let mut metrics_guard = metrics.lock().await;
+                if let Some(endpoint_metrics) = metrics_guard.get_mut(&endpoint) {
+                    endpoint_metrics.record_failure();
+                }
+                
+                Err(anyhow!("RPC send timeout after {:?}", latency))
+            }
+        }
+    }
+
 
             // Wait for results with early cancellation
             while let Some(join_res) = set.join_next().await {
@@ -351,13 +468,17 @@ impl RpcBroadcaster for RpcManager {
                     Err(join_err) => {
                         warn!("RpcManager: task join error: {}", join_err);
                     }
+
                 }
             }
+        }
+
 
             Err(anyhow!(
                 "RpcManager: all sends failed (fatal_errors: {})", 
                 fatal_errors
             ))
         })
+
     }
 }

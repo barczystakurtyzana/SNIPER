@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use crate::rpc_manager::BroadcastMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -27,11 +28,13 @@ impl Default for SnifferMode {
     }
 }
 
+
 impl Default for BroadcastMode {
     fn default() -> Self {
         BroadcastMode::Pairwise
     }
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -53,6 +56,14 @@ pub struct Config {
     // Mode
     #[serde(default)]
     pub sniffer_mode: SnifferMode,
+    
+    // Broadcast configuration
+    #[serde(default)]
+    pub broadcast_mode: BroadcastMode,
+    #[serde(default = "default_rpc_timeout_secs")]
+    pub rpc_timeout_secs: u64,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
 
     // RPC Broadcasting Configuration
     #[serde(default)]
@@ -103,6 +114,7 @@ impl Default for Config {
             broadcast_mode: BroadcastMode::Pairwise,
             rpc_timeout_sec: default_rpc_timeout_sec(),
             early_cancel_threshold: default_early_cancel_threshold(),
+
             meta_fetch_enabled: false,
             meta_fetch_commitment: Some("confirmed".to_string()),
             wss_required: false,
@@ -129,6 +141,12 @@ fn default_nonce_count() -> usize {
 }
 fn default_gui_interval() -> u64 {
     200
+}
+fn default_rpc_timeout_secs() -> u64 {
+    8
+}
+fn default_max_retries() -> u32 {
+    3
 }
 
 // WSS defaults

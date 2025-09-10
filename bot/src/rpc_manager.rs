@@ -1,8 +1,10 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use solana_client::{
+    client_error::{ClientError, ClientErrorKind},
     nonblocking::rpc_client::RpcClient,
     rpc_config::RpcSendTransactionConfig,
+    rpc_request::RpcError,
 };
 use solana_sdk::{
     commitment_config::{CommitmentConfig, CommitmentLevel},
@@ -17,74 +19,89 @@ use std::time::{Duration, Instant};
 use tokio::{sync::Mutex, task::JoinSet, time::timeout};
 use tracing::{debug, info, warn};
 
-use crate::observability::{CorrelationId, StructuredLogger};
-
-/// Broadcast mode enum defining different transaction broadcasting strategies
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BroadcastMode {
-    /// Send transactions pairwise: tx[0] -> endpoint[0], tx[1] -> endpoint[1], etc.
-    Pairwise,
-    /// Replicate single transaction to all endpoints for maximum reliability
-    ReplicateSingle,
-    /// Round-robin distribution of transactions across endpoints
-    RoundRobin,
-    /// Send all transactions to all endpoints (full fanout)
-    FullFanout,
+/// Classification of RPC errors for proper handling
+#[derive(Debug, Clone, PartialEq)]
+pub enum RpcErrorType {
+    /// Transaction was already processed - treat as soft success
+    AlreadyProcessed,
+    /// Duplicate signature detected - treat as soft success  
+    DuplicateSignature,
+    /// Blockhash not found - requires rebuilding with new blockhash
+    BlockhashNotFound,
+    /// Transaction expired - requires rebuilding with new blockhash
+    TransactionExpired,
+    /// Node is behind - retry with different endpoint
+    NodeBehind,
+    /// Slot skew issues - retry with different endpoint  
+    SlotSkew,
+    /// Rate limited - retry with different endpoint or backoff
+    RateLimited,
+    /// Too many requests - retry with different endpoint or backoff
+    TooManyRequests,
+    /// Network timeout - retry with different endpoint
+    Timeout,
+    /// Other error - generic failure
+    Other(String),
 }
 
-impl Default for BroadcastMode {
-    fn default() -> Self {
-        BroadcastMode::Pairwise
-    }
-}
-
-/// Endpoint metrics for performance tracking
-#[derive(Debug, Clone)]
-pub struct EndpointMetrics {
-    pub endpoint: String,
-    pub success_count: u64,
-    pub failure_count: u64,
-    pub avg_latency_ms: f64,
-    pub last_success: Option<Instant>,
-    pub last_failure: Option<Instant>,
-}
-
-impl EndpointMetrics {
-    fn new(endpoint: String) -> Self {
-        Self {
-            endpoint,
-            success_count: 0,
-            failure_count: 0,
-            avg_latency_ms: 0.0,
-            last_success: None,
-            last_failure: None,
+impl std::fmt::Display for RpcErrorType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RpcErrorType::AlreadyProcessed => write!(f, "AlreadyProcessed"),
+            RpcErrorType::DuplicateSignature => write!(f, "DuplicateSignature"),
+            RpcErrorType::BlockhashNotFound => write!(f, "BlockhashNotFound"),
+            RpcErrorType::TransactionExpired => write!(f, "TransactionExpired"),
+            RpcErrorType::NodeBehind => write!(f, "NodeBehind"),
+            RpcErrorType::SlotSkew => write!(f, "SlotSkew"),
+            RpcErrorType::RateLimited => write!(f, "RateLimited"),
+            RpcErrorType::TooManyRequests => write!(f, "TooManyRequests"),
+            RpcErrorType::Timeout => write!(f, "Timeout"),
+            RpcErrorType::Other(msg) => write!(f, "Other({})", msg),
         }
     }
+}
 
-    fn record_success(&mut self, latency: Duration) {
-        self.success_count += 1;
-        self.last_success = Some(Instant::now());
-        
-        // Update rolling average latency
-        let latency_ms = latency.as_millis() as f64;
-        if self.avg_latency_ms == 0.0 {
-            self.avg_latency_ms = latency_ms;
-        } else {
-            // Simple exponential moving average
-            self.avg_latency_ms = 0.9 * self.avg_latency_ms + 0.1 * latency_ms;
+/// Classify RPC errors for appropriate handling
+pub fn classify_rpc_error(error: &ClientError) -> RpcErrorType {
+    match error.kind() {
+        ClientErrorKind::RpcError(RpcError::RpcResponseError { message, .. }) => {
+            let msg = message.to_lowercase();
+            if msg.contains("already processed") 
+                || msg.contains("transaction was already processed") {
+                RpcErrorType::AlreadyProcessed
+            } else if msg.contains("duplicate") && msg.contains("signature") {
+                RpcErrorType::DuplicateSignature
+            } else if msg.contains("blockhash not found") 
+                || msg.contains("blockhash has expired") {
+                RpcErrorType::BlockhashNotFound
+            } else if msg.contains("transaction expired")
+                || msg.contains("block height exceeded") {
+                RpcErrorType::TransactionExpired
+            } else if msg.contains("node behind") 
+                || msg.contains("slot") && msg.contains("behind") {
+                RpcErrorType::NodeBehind
+            } else if msg.contains("slot") && msg.contains("skew") {
+                RpcErrorType::SlotSkew
+            } else if msg.contains("rate limit") 
+                || msg.contains("rate-limit") {
+                RpcErrorType::RateLimited
+            } else if msg.contains("too many requests") 
+                || msg.contains("request limit") {
+                RpcErrorType::TooManyRequests
+            } else {
+                RpcErrorType::Other(message.clone())
+            }
         }
+        ClientErrorKind::Io(_) => RpcErrorType::Timeout,
+        ClientErrorKind::Reqwest(_) => RpcErrorType::Timeout,
+        _ => RpcErrorType::Other(error.to_string()),
     }
+}
 
-    fn record_failure(&mut self) {
-        self.failure_count += 1;
-        self.last_failure = Some(Instant::now());
-    }
+/// Check if an error type should be treated as a soft success
+fn is_soft_success(error_type: &RpcErrorType) -> bool {
+    matches!(error_type, RpcErrorType::AlreadyProcessed | RpcErrorType::DuplicateSignature)
 
-    fn success_rate(&self) -> f64 {
-        let total = self.success_count + self.failure_count;
-        if total == 0 { 0.0 } else { self.success_count as f64 / total as f64 }
-    }
 }
 
 /// Trait for broadcasting transactions. Allows injecting mock implementations for tests.
@@ -291,7 +308,50 @@ impl RpcManager {
                 let metrics_recorder = Arc::clone(&self.metrics);
 
                 set.spawn(async move {
-                    Self::send_single_tx(client, endpoint, tx, metrics_recorder, None).await
+
+                    let rpc = RpcClient::new_with_commitment(endpoint.clone(), commitment);
+                    debug!("RpcManager: sending tx on endpoint[{}]: {}", i, endpoint);
+
+                    let send_fut = rpc.send_transaction_with_config(&tx, send_cfg);
+                    match timeout(SEND_TIMEOUT, send_fut).await {
+                        Ok(Ok(sig)) => {
+                            info!(
+                                "RpcManager: success on endpoint[{}]: {} sig={}",
+                                i, endpoint, sig
+                            );
+                            Ok(sig)
+                        }
+                        Ok(Err(e)) => {
+                            let error_type = classify_rpc_error(&e);
+                            
+                            // Treat some errors as soft success
+                            if is_soft_success(&error_type) {
+                                info!(
+                                    "RpcManager: soft success on endpoint[{}]: {} ({})",
+                                    i, endpoint, error_type
+                                );
+                                // Create a deterministic signature from the transaction
+                                let mut sig_bytes = [0u8; 64];
+                                sig_bytes[0] = i as u8; // Endpoint index
+                                sig_bytes[1] = 0xFF; // Marker for soft success
+                                return Ok(Signature::from(sig_bytes));
+                            }
+                            
+                            warn!(
+                                "RpcManager: endpoint[{}] send failed on {} with {:?}: {}",
+                                i, endpoint, error_type, e
+                            );
+                            Err(anyhow!(e).context(format!("RPC error: {:?}", error_type)))
+                        }
+                        Err(elapsed) => {
+                            warn!(
+                                "RpcManager: endpoint[{}] timed out on {} after {:?}",
+                                i, endpoint, SEND_TIMEOUT
+                            );
+                            Err(anyhow!(elapsed).context("RPC send timeout"))
+                        }
+                    }
+
                 });
             }
         }

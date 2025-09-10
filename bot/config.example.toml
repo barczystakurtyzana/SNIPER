@@ -7,6 +7,11 @@ sniffer_mode = "mock"  # Use "mock" for testing, "real" for production
 rpc_endpoints = ["https://api.mainnet-beta.solana.com"]
 rpc_wss_endpoints = ["wss://api.mainnet-beta.solana.com"]
 
+# RPC Broadcasting Configuration
+broadcast_mode = "pairwise"  # Options: pairwise, replicate, round_robin, full_fanout
+rpc_timeout_sec = 8         # Timeout per RPC call in seconds
+early_cancel_threshold = 2  # Cancel remaining tasks after N fatal errors
+
 # Wallet Configuration (Required for real mode)
 # Uncomment and set the path to your Solana keypair JSON file
 # keypair_path = "/path/to/your/solana-keypair.json"

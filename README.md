@@ -243,7 +243,88 @@ Powrót do sniffingu:
 Po pełnej sprzedaży wraca do sniffera.
 
 
-# RpcManager:
+# RpcManager (Improved):
+
+Cel
+Zapewnia asynchroniczne, równoległe rozsyłanie transakcji (VersionedTransaction) do wielu endpointów RPC Solana z zaawansowanymi strategiami broadcastu, adaptacyjnym rankingowaniem endpointów i inteligentną obsługą błędów.
+Pozwala na łatwe mockowanie w testach dzięki traitowi RpcBroadcaster.
+
+**ULEPSZONE FUNKCJONALNOŚCI:**
+✅ Naprawione sztywne 1:1 pairing - dodano strategie broadcast
+✅ Adaptacyjne rankingowanie endpointów na podstawie latencji i success rate
+✅ Konfigurowalne timeouty zamiast stałych 8s
+✅ Naprawiona spójność commitment (Confirmed vs Processed mismatch)
+✅ Wczesne anulowanie przy błędach krytycznych (early-cancel policy)
+✅ Cache RpcClient - unika TLS handshake overhead
+✅ Lepsza redundancja - wykorzystuje endpoints > txs
+
+Główne elementy
+1. Trait: RpcBroadcaster
+Rust
+pub trait RpcBroadcaster: Send + Sync {
+    fn send_on_many_rpc<'a>(
+        &'a self,
+        txs: Vec<VersionedTransaction>,
+    ) -> Pin<Box<dyn Future<Output = Result<Signature>> + Send + 'a>>;
+}
+
+Definiuje interfejs do broadcastu listy transakcji i zwraca pierwszy udany Signature lub błąd.
+
+2. Produkcyjna implementacja: RpcManager (Ulepszona)
+Rust
+pub struct RpcManager {
+    pub endpoints: Vec<String>,
+    pub config: Config,
+    // Cached RPC clients - unika TLS overhead
+    clients: Arc<RwLock<HashMap<String, Arc<RpcClient>>>>,
+    // Metryki wydajności dla adaptacyjnego rankingu
+    metrics: Arc<RwLock<HashMap<String, EndpointMetrics>>>,
+}
+
+Konstruktory:
+- `new(endpoints)` - domyślny config
+- `new_with_config(endpoints, config)` - pełna kontrola
+
+3. Strategie Broadcastu (BroadcastMode)
+```toml
+broadcast_mode = "pairwise"    # Sztywne 1:1 (oryginał)
+broadcast_mode = "replicate"   # Najlepsza TX → wszystkie endpoints 
+broadcast_mode = "round_robin" # TX równomiernie po endpoints
+broadcast_mode = "full_fanout" # Każda TX → każdy endpoint
+```
+
+4. Adaptacyjne Rankingowanie
+EndpointMetrics track:
+- success_rate = sukces/(sukces+błąd)  
+- avg_latency_ms = średnia latencja
+- score = success_rate * (1000/latency) 
+
+Najlepsze endpointy używane pierwsze.
+
+5. Wczesne Anulowanie
+```toml
+early_cancel_threshold = 2  # Anuluj po 2 błędach krytycznych
+```
+Błędy krytyczne: "BlockhashNotFound", "TransactionExpired", "AlreadyProcessed"
+
+6. Konfigurowalne Timeouty  
+```toml
+rpc_timeout_sec = 8  # Domyślnie 8s, ale konfigurowalne
+```
+
+Obsługa błędów
+Wszystkie błędy logowane i uwzględniane w metrykach adaptacyjnych.
+Wczesne anulowanie oszczędza czas przy błędach wskazujących na wygaśnięte transakcje.
+
+Przykładowe zastosowanie
+- **Replicate mode**: Pojedyncza SELL transakcja wysłana do wszystkich 6 endpointów
+- **Round-robin**: 10 transakcji równomiernie po 3 endpointach  
+- **Adaptacyjny ranking**: Wolne/niestabilne endpointy automatycznie depriorytetyzowane
+- **Wczesne anulowanie**: Oszczędza czas gdy wszystkie TX są już wygasłe
+
+Podsumowanie  
+Zaawansowany RpcManager rozwiązuje wszystkie problemy wysokiego priorytetu:
+redundancje, adaptacyjność, konfigurowalność, spójność, wczesne anulowanie i cache.
 
 Cel
 Zapewnia asynchroniczne, równoległe rozsyłanie transakcji (VersionedTransaction) do wielu endpointów RPC Solana oraz obsługę sukcesu/błędów i timeoutów.

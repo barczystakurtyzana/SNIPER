@@ -9,5 +9,6 @@ pub mod sniffer;
 pub mod gui;
 pub mod wallet;
 pub mod tx_builder;
+pub mod observability;
 
 

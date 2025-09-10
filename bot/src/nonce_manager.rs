@@ -1,10 +1,12 @@
 use anyhow::{anyhow, Result};
 use solana_sdk::pubkey::Pubkey;
+
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore, SemaphorePermit};
 
 /// RAII wrapper for a nonce slot that properly manages semaphore permit
+
 #[derive(Debug)]
 pub struct SlotLease {
     idx: usize,
@@ -65,6 +67,7 @@ impl Drop for SlotLease {
 struct NonceManagerInner {
     capacity: usize,
     sem: Arc<Semaphore>,
+
     free: Arc<Mutex<VecDeque<usize>>>,
     allocated: Arc<Mutex<HashSet<usize>>>,
 }
@@ -74,6 +77,7 @@ struct NonceManagerInner {
 /// - acquire_nonce() returns a SlotLease that manages the permit lifecycle via RAII
 #[derive(Debug)]
 pub struct NonceManager {
+
     inner: Arc<NonceManagerInner>,
 }
 
@@ -83,6 +87,7 @@ impl NonceManager {
         let inner = Arc::new(NonceManagerInner {
             capacity,
             sem: Arc::new(Semaphore::new(capacity)),
+
             free: Arc::new(Mutex::new(free)),
             allocated: Arc::new(Mutex::new(HashSet::new())),
         });
@@ -91,12 +96,14 @@ impl NonceManager {
 
     pub async fn acquire_nonce(&self) -> Result<SlotLease> {
         // Acquire semaphore permit first - this blocks if at capacity
+
         let permit = self
             .inner
             .sem
             .acquire()
             .await
             .map_err(|_| anyhow!("semaphore closed"))?;
+
 
         // Get next available index
         let mut free_guard = self.inner.free.lock().await;
@@ -125,8 +132,14 @@ impl NonceManager {
         } else {
             // This should not happen with proper semaphore usage
             Err(anyhow!("no free nonce index despite semaphore permit"))
+
         }
+        
+        // All permits should be available again
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(manager.available_permits(), 5);
     }
+
 
     /// Legacy method for backward compatibility - prefer using SlotLease directly
     /// Note: This method is now deprecated and should not be used in new code
@@ -153,5 +166,6 @@ impl NonceManager {
                 tracing::warn!("release_nonce called on non-allocated or already released index {}", idx);
             }
         });
+
     }
 }

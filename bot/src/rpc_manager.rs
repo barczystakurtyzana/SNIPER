@@ -1,8 +1,10 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use solana_client::{
+    client_error::{ClientError, ClientErrorKind},
     nonblocking::rpc_client::RpcClient,
     rpc_config::RpcSendTransactionConfig,
+    rpc_request::RpcError,
 };
 use solana_sdk::{
     commitment_config::{CommitmentConfig, CommitmentLevel},
@@ -16,6 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::{sync::RwLock, task::JoinSet, time::timeout};
 use tracing::{debug, info, warn};
+
 
 use crate::config::{BroadcastMode, Config};
 
@@ -35,8 +38,11 @@ impl EndpointMetrics {
             error_count: 0,
             total_latency_ms: 0,
             last_success: None,
+
         }
     }
+}
+
 
     fn success_rate(&self) -> f64 {
         let total = self.success_count + self.error_count;
@@ -44,8 +50,14 @@ impl EndpointMetrics {
             1.0 // Assume good until proven otherwise
         } else {
             self.success_count as f64 / total as f64
+
         }
+        ClientErrorKind::Io(_) => RpcErrorType::Timeout,
+        ClientErrorKind::Reqwest(_) => RpcErrorType::Timeout,
+        _ => RpcErrorType::Other(error.to_string()),
     }
+}
+
 
     fn avg_latency_ms(&self) -> f64 {
         if self.success_count == 0 {
@@ -65,6 +77,7 @@ impl EndpointMetrics {
         self.error_count += 1;
 
     }
+
 }
 
 /// Trait for broadcasting transactions. Allows injecting mock implementations for tests.
@@ -302,6 +315,7 @@ impl RpcBroadcaster for RpcManager {
                 let self_clone = self.clone();
                 
                 set.spawn(async move {
+
                     let start_time = Instant::now();
                     debug!("RpcManager: sending tx on endpoint: {}", endpoint);
 
@@ -332,7 +346,7 @@ impl RpcBroadcaster for RpcManager {
                             // Record timeout as error
                             self_clone.record_metrics(&endpoint, false, None).await;
                             Err(anyhow!("RPC send timeout"))
-                        }
+        }
                     }
 
                 });

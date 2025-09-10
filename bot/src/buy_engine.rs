@@ -20,10 +20,8 @@ use solana_sdk::{
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
-
 use crate::config::Config;
-use crate::nonce_manager::{NonceManager, NonceLease};
-use crate::observability::{CorrelationId, StructuredLogger};
+use crate::nonce_manager::{NonceManager, SlotLease};
 use crate::rpc_manager::RpcBroadcaster;
 use crate::tx_builder::{TransactionBuilder, TransactionConfig};
 use crate::types::{AppState, CandidateReceiver, Mode, PremintCandidate};
@@ -288,8 +286,10 @@ impl BuyEngine {
             self.pending_buy.store(false, Ordering::Relaxed);
         });
 
-        // Use proper RAII nonce leases
-        let mut nonce_leases: Vec<NonceLease> = Vec::new();
+
+    async fn try_buy(&self, candidate: PremintCandidate) -> Result<Signature> {
+        let mut acquired_leases: Vec<SlotLease> = Vec::new();
+
         let mut txs: Vec<VersionedTransaction> = Vec::new();
 
         // Get recent blockhash once for all transactions
@@ -300,7 +300,9 @@ impl BuyEngine {
                 Ok(lease) => {
                     let tx = self.create_buy_transaction(&candidate, recent_blockhash).await?;
                     txs.push(tx);
-                    nonce_leases.push(lease);
+
+                    acquired_leases.push(lease);
+
                 }
                 Err(e) => {
                     warn!(error=%e, "Failed to acquire nonce; proceeding with {} transactions", txs.len());
@@ -310,6 +312,9 @@ impl BuyEngine {
         }
 
         if txs.is_empty() {
+
+            // Leases will be automatically released when acquired_leases goes out of scope
+
             return Err(anyhow!("no transactions prepared (no nonces acquired)"));
         }
 
@@ -321,33 +326,10 @@ impl BuyEngine {
             .await
             .context("broadcast BUY failed");
 
-        // Nonce leases will be automatically released when they go out of scope
 
-        result
-    }
+        // Leases will be automatically released when acquired_leases goes out of scope
+        res
 
-    fn is_candidate_interesting(&self, c: &PremintCandidate) -> bool {
-        c.program == "pump.fun"
-    }
-
-    async fn get_execution_price_mock(&self, _candidate: &PremintCandidate) -> f64 {
-        1.0_f64
-    }
-
-    /// Get recent blockhash with timeout
-    async fn get_recent_blockhash(&self) -> Option<solana_sdk::hash::Hash> {
-        match &self.tx_builder {
-            Some(builder) => {
-                // Try to get fresh blockhash, but don't fail if network is unavailable
-                match tokio::time::timeout(Duration::from_millis(2000), async {
-                    builder.rpc_client().get_latest_blockhash().await
-                }).await {
-                    Ok(Ok(hash)) => Some(hash),
-                    _ => None, // Use None to let tx_builder handle it
-                }
-            }
-            None => None,
-        }
     }
 
     async fn create_buy_transaction(

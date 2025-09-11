@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 
 
 use crate::config::{BroadcastMode, Config};
-use crate::observability::CorrelationId;
+use crate::observability::{CorrelationId, StructuredLogger};
 
 /// Endpoint performance metrics for adaptive ranking
 #[derive(Debug, Clone)]

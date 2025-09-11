@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    sync::{mpsc, RwLock, Semaphore},
+    sync::{mpsc, RwLock, Semaphore, Mutex},
     task, time,
 };
 use serde::{Deserialize, Serialize};
@@ -34,18 +34,10 @@ use tokio_retry::{
     strategy::{ExponentialBackoff, jitter},
 };
 
-// 1. Struktury danych
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PremintCandidate {
-    pub mint_account: Pubkey,
-    pub creator: Pubkey,
-    pub program: String,
-    pub slot: Slot,
-    pub timestamp: u64,
-    pub instruction_summary: String,
-    pub is_jito_bundle: bool,
-}
+// Import types from crate
+use crate::types::{PremintCandidate, QuantumCandidateGui};
 
+// 1. Struktury danych
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScoredCandidate {
     pub base: PremintCandidate,
@@ -68,6 +60,7 @@ pub struct OracleConfig {
     pub cache_ttl_seconds: u64,
     pub max_parallel_requests: usize,
     pub rate_limit_requests_per_second: u32,
+    pub notify_threshold: u8, // GUI notification threshold (default 75)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,11 +91,12 @@ pub struct ScoreThresholds {
 pub struct PredictiveOracle {
     pub candidate_receiver: mpsc::Receiver<PremintCandidate>,
     pub scored_sender: mpsc::Sender<ScoredCandidate>,
+    pub gui_suggestions: Arc<Mutex<Option<mpsc::Sender<QuantumCandidateGui>>>>,
     pub rpc_clients: NonEmpty<Arc<RpcClient>>,
     pub http_client: Client,
     pub config: OracleConfig,
     pub token_cache: RwLock<HashMap<Pubkey, (Instant, TokenData)>>,
-    pub metrics: OracleMetrics,
+    pub metrics: Arc<RwLock<OracleMetrics>>,
     pub rate_limiter: Arc<DefaultDirectRateLimiter>,
     pub request_semaphore: Arc<Semaphore>,
 }
@@ -221,16 +215,27 @@ impl PredictiveOracle {
         Ok(Self {
             candidate_receiver,
             scored_sender,
+            gui_suggestions: Arc::new(Mutex::new(None)),
             rpc_clients,
             http_client: Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()?,
             config,
             token_cache: RwLock::new(HashMap::new()),
-            metrics: OracleMetrics::default(),
+            metrics: Arc::new(RwLock::new(OracleMetrics::default())),
             rate_limiter,
             request_semaphore,
         })
+    }
+
+    pub fn set_gui_sender(&self, sender: mpsc::Sender<QuantumCandidateGui>) {
+        tokio::spawn({
+            let gui_suggestions = self.gui_suggestions.clone();
+            async move {
+                let mut gui_lock = gui_suggestions.lock().await;
+                *gui_lock = Some(sender);
+            }
+        });
     }
 
     pub async fn run(&mut self) {
@@ -258,6 +263,24 @@ impl PredictiveOracle {
                         if scored.predicted_score >= 80 {
                             metrics.high_score_count += 1;
                         }
+                        drop(metrics);
+                        
+                        // Send GUI suggestion if score meets threshold
+                        if scored.predicted_score >= oracle.config.notify_threshold {
+                            let gui_suggestion = QuantumCandidateGui {
+                                mint: candidate.mint,
+                                score: scored.predicted_score,
+                                reason: scored.reason.clone(),
+                                feature_scores: scored.feature_scores.clone(),
+                                timestamp: candidate.timestamp,
+                            };
+                            
+                            if let Some(sender) = oracle.gui_suggestions.lock().await.as_ref() {
+                                if let Err(e) = sender.send(gui_suggestion).await {
+                                    warn!("Failed to send GUI suggestion: {}", e);
+                                }
+                            }
+                        }
                         
                         // Wyślij wynik
                         if let Err(e) = oracle.scored_sender.send(scored.clone()).await {
@@ -265,10 +288,10 @@ impl PredictiveOracle {
                         }
                         
                         info!("Scored candidate: {} in {}μs. Score: {}",
-                            candidate.mint_account, scoring_time, scored.predicted_score);
+                            candidate.mint, scoring_time, scored.predicted_score);
                     }
                     Err(e) => {
-                        warn!("Failed to score candidate {}: {}", candidate.mint_account, e);
+                        warn!("Failed to score candidate {}: {}", candidate.mint, e);
                     }
                 }
                 
@@ -308,7 +331,7 @@ impl PredictiveOracle {
         feature_scores.insert("price_change".to_string(), price_change_score);
         
         // 6. Obecność w bundle Jito
-        let jito_score = if candidate.is_jito_bundle { 1.0 } else { 0.0 };
+        let jito_score = if candidate.is_jito_bundle.unwrap_or(false) { 1.0 } else { 0.0 };
         feature_scores.insert("jito_bundle_presence".to_string(), jito_score);
         
         // 7. Czas sprzedaży twórcy
@@ -352,7 +375,7 @@ impl PredictiveOracle {
         // Sprawdź cache (read lock)
         {
             let cache = self.token_cache.read().await;
-            if let Some((instant, data)) = cache.get(&candidate.mint_account) {
+            if let Some((instant, data)) = cache.get(&candidate.mint) {
                 if instant.elapsed().as_secs() < self.config.cache_ttl_seconds {
                     let mut metrics = self.metrics.write().await;
                     metrics.cache_hits += 1;
@@ -425,21 +448,21 @@ impl PredictiveOracle {
         // Zapisz w cache (write lock)
         {
             let mut cache = self.token_cache.write().await;
-            cache.insert(candidate.mint_account, (Instant::now(), token_data.clone()));
+            cache.insert(candidate.mint, (Instant::now(), token_data.clone()));
         }
         
         Ok(token_data)
     }
 
     async fn fetch_token_metadata(&self, candidate: &PremintCandidate, rpc: &RpcClient) -> Result<(u64, u8, String, Option<Metadata>)> {
-        let account = rpc.get_account(&candidate.mint_account).await
+        let account = rpc.get_account(&candidate.mint).await
             .context("Failed to fetch mint account")?;
         
         let mint = Mint::unpack(&account.data)
             .context("Failed to unpack mint account")?;
         
         // Pobierz metadane tokena (Metaplex)
-        let metadata_uri = self.resolve_metadata_uri(&candidate.mint_account, rpc).await
+        let metadata_uri = self.resolve_metadata_uri(&candidate.mint, rpc).await
             .unwrap_or_else(|_| "https://example.com/token.json".to_string());
         
         // Pobierz pełne metadane jeśli URI jest dostępne
@@ -495,11 +518,11 @@ impl PredictiveOracle {
     }
 
     async fn fetch_holder_distribution(&self, candidate: &PremintCandidate, rpc: &RpcClient) -> Result<Vec<HolderData>> {
-        let largest_accounts = rpc.get_token_largest_accounts(&candidate.mint_account)
+        let largest_accounts = rpc.get_token_largest_accounts(&candidate.mint)
             .await
             .context("Failed to fetch token largest accounts")?;
         
-        let total_supply = rpc.get_token_supply(&candidate.mint_account)
+        let total_supply = rpc.get_token_supply(&candidate.mint)
             .await
             .context("Failed to fetch token supply")?
             .amount
@@ -554,7 +577,7 @@ impl PredictiveOracle {
 
     async fn fetch_volume_data(&self, candidate: &PremintCandidate, rpc: &RpcClient) -> Result<VolumeData> {
         // Pobierz transakcje tokena
-        let signatures = rpc.get_signatures_for_address(&candidate.mint_account)
+        let signatures = rpc.get_signatures_for_address(&candidate.mint)
             .await
             .context("Failed to fetch transaction signatures")?;
         
@@ -598,7 +621,7 @@ impl PredictiveOracle {
         // Znajdź konto tokena twórcy
         let creator_token_accounts = rpc.get_token_accounts_by_owner(
             &candidate.creator,
-            solana_client::rpc_request::TokenAccountsFilter::Mint(candidate.mint_account),
+            solana_client::rpc_request::TokenAccountsFilter::Mint(candidate.mint),
         ).await
         .context("Failed to fetch creator token accounts")?;
         
@@ -626,7 +649,7 @@ impl PredictiveOracle {
 
     async fn fetch_offchain_data(&self, candidate: &PremintCandidate) -> Result<()> {
         if let Some(api_key) = &self.config.pump_fun_api_key {
-            let url = format!("https://api.pump.fun/token/{}", candidate.mint_account);
+            let url = format!("https://api.pump.fun/token/{}", candidate.mint);
             let response = self.http_client.get(&url)
                 .header("Authorization", format!("Bearer {}", api_key))
                 .send()
@@ -647,7 +670,7 @@ impl PredictiveOracle {
             let query = json!({
                 "query": format!(
                     "{{ solana {{ transfers(token: \"{}\") {{ count }} }} }}",
-                    candidate.mint_account
+                    candidate.mint
                 )
             });
             
@@ -894,7 +917,7 @@ impl PredictiveOracle {
     // 7. Integracja z GUI
     pub async fn send_to_gui(&self, scored: &ScoredCandidate) {
         let gui_data = json!({
-            "mint": scored.base.mint_account.to_string(),
+            "mint": scored.base.mint.to_string(),
             "score": scored.predicted_score,
             "features": scored.feature_scores,
             "reason": scored.reason,
@@ -960,6 +983,7 @@ impl Clone for PredictiveOracle {
         Self {
             candidate_receiver: self.candidate_receiver.clone(),
             scored_sender: self.scored_sender.clone(),
+            gui_suggestions: self.gui_suggestions.clone(),
             rpc_clients: self.rpc_clients.clone(),
             http_client: self.http_client.clone(),
             config: self.config.clone(),

@@ -12,7 +12,7 @@ use solana_sdk::{
     transaction::VersionedTransaction,
 };
 
-use std::{collections::HashMap, future::Future, sync::Arc};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Instant};
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -21,6 +21,7 @@ use tracing::{debug, info, warn};
 
 
 use crate::config::{BroadcastMode, Config};
+use crate::observability::{CorrelationId, StructuredLogger};
 
 /// Endpoint performance metrics for adaptive ranking
 #[derive(Debug, Clone)]
@@ -38,11 +39,8 @@ impl EndpointMetrics {
             error_count: 0,
             total_latency_ms: 0,
             last_success: None,
-
         }
     }
-}
-
 
     fn success_rate(&self) -> f64 {
         let total = self.success_count + self.error_count;
@@ -50,14 +48,8 @@ impl EndpointMetrics {
             1.0 // Assume good until proven otherwise
         } else {
             self.success_count as f64 / total as f64
-
         }
-        ClientErrorKind::Io(_) => RpcErrorType::Timeout,
-        ClientErrorKind::Reqwest(_) => RpcErrorType::Timeout,
-        _ => RpcErrorType::Other(error.to_string()),
     }
-}
-
 
     fn avg_latency_ms(&self) -> f64 {
         if self.success_count == 0 {
@@ -75,9 +67,7 @@ impl EndpointMetrics {
 
     fn record_error(&mut self) {
         self.error_count += 1;
-
     }
-
 }
 
 /// Trait for broadcasting transactions. Allows injecting mock implementations for tests.
@@ -251,6 +241,7 @@ impl RpcBroadcaster for RpcManager {
         }
 
         Self::wait_for_first_success(set).await
+        })
     }
 
     /// Send a single transaction and record metrics

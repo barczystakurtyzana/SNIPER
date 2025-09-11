@@ -4,13 +4,26 @@ use solana_sdk::message::{v0, VersionedMessage};
 use solana_sdk::instruction::Instruction;
 use solana_sdk::hash::Hash;
 use tokio::sync::mpsc;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PremintCandidate {
     pub mint: Pubkey,
     pub creator: Pubkey,
     pub program: String,
     pub slot: u64,
+    pub timestamp: u64,
+    pub instruction_summary: Option<String>,
+    pub is_jito_bundle: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuantumCandidateGui {
+    pub mint: Pubkey,
+    pub score: u8,
+    pub reason: String,
+    pub feature_scores: HashMap<String, f64>,
     pub timestamp: u64,
 }
 
@@ -21,6 +34,7 @@ pub type CandidateReceiver = mpsc::Receiver<PremintCandidate>;
 pub enum Mode {
     Sniffing,
     PassiveToken(Pubkey),
+    QuantumManual,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +43,7 @@ pub struct AppState {
     pub active_token: Option<PremintCandidate>,
     pub last_buy_price: Option<f64>,
     pub holdings_percent: f64,
+    pub quantum_suggestions: Vec<QuantumCandidateGui>,
 }
 
 impl AppState {

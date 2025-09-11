@@ -7,11 +7,13 @@ use eframe::{App, Frame};
 use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::info;
 
-use crate::types::{AppState, Mode};
+use crate::types::{AppState, Mode, QuantumCandidateGui};
+use solana_sdk::pubkey::Pubkey;
 
 #[derive(Clone, Debug)]
 pub enum GuiEvent {
     SellPercent(f64),
+    Buy(Pubkey), // New buy event for quantum manual mode
 }
 pub type GuiEventSender = Sender<GuiEvent>;
 
@@ -52,30 +54,72 @@ impl BotApp {
             Mode::PassiveToken(mint) => {
                 ui.label(format!("Mode: PassiveToken ({mint})"));
             }
+            Mode::QuantumManual => {
+                ui.label("Mode: Quantum (Manual)");
+                
+                // Show quantum suggestions
+                if !st.quantum_suggestions.is_empty() {
+                    ui.separator();
+                    ui.heading("🎯 Quantum Suggestions");
+                    
+                    for suggestion in &st.quantum_suggestions {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(format!("🪙 {}", suggestion.mint));
+                                    ui.label(format!("Score: {}%", suggestion.score));
+                                    ui.label(format!("Reason: {}", suggestion.reason));
+                                });
+                                
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("🛒 BUY").clicked() {
+                                        let _ = self.gui_tx.try_send(GuiEvent::Buy(suggestion.mint));
+                                    }
+                                });
+                            });
+                            
+                            // Show top feature scores
+                            ui.collapsing("Feature Scores", |ui| {
+                                for (feature, score) in &suggestion.feature_scores {
+                                    ui.label(format!("{}: {:.2}", feature, score));
+                                }
+                            });
+                        });
+                    }
+                } else {
+                    ui.label("🔍 Scanning for opportunities...");
+                    ui.label("Suggestions will appear when tokens score ≥ 75%");
+                }
+            }
         }
+        
         if let Some(tok) = st.active_token.as_ref() {
+            ui.separator();
             ui.label(format!("Active mint: {}", tok.mint));
             if let Some(price) = st.last_buy_price {
                 ui.label(format!("Last buy price (mock): {:.4}", price));
             }
             ui.label(format!("Holdings: {:.0}%", st.holdings_percent * 100.0));
-        } else {
+        } else if !matches!(st.mode, Mode::QuantumManual) {
             ui.label("No active token");
         }
 
-        ui.separator();
-        ui.horizontal(|ui| {
-            if ui.button("Sell 25% (W)").clicked() {
-                let _ = self.gui_tx.try_send(GuiEvent::SellPercent(0.25));
-            }
-            if ui.button("Sell 50% (Q)").clicked() {
-                let _ = self.gui_tx.try_send(GuiEvent::SellPercent(0.50));
-            }
-            if ui.button("Sell 100% (S)").clicked() {
-                let _ = self.gui_tx.try_send(GuiEvent::SellPercent(1.0));
-            }
-        });
-        ui.label("Shortcuts: W=25%, Q=50%, S=100%");
+        // Show sell controls only if we have holdings
+        if st.holdings_percent > 0.0 {
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Sell 25% (W)").clicked() {
+                    let _ = self.gui_tx.try_send(GuiEvent::SellPercent(0.25));
+                }
+                if ui.button("Sell 50% (Q)").clicked() {
+                    let _ = self.gui_tx.try_send(GuiEvent::SellPercent(0.50));
+                }
+                if ui.button("Sell 100% (S)").clicked() {
+                    let _ = self.gui_tx.try_send(GuiEvent::SellPercent(1.0));
+                }
+            });
+            ui.label("Shortcuts: W=25%, Q=50%, S=100%");
+        }
     }
 }
 

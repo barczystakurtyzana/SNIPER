@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use serde::{Deserialize, Serialize};
 use solana_client::{
     client_error::{ClientError, ClientErrorKind},
     nonblocking::rpc_client::RpcClient,
@@ -19,9 +18,42 @@ use std::time::Duration;
 use tokio::{sync::RwLock, task::JoinSet, time::timeout};
 use tracing::{debug, info, warn};
 
-
 use crate::config::Config;
-use crate::observability::{CorrelationId, StructuredLogger};
+use crate::observability::CorrelationId;
+
+/// Classification of RPC errors for handling logic
+#[derive(Debug, PartialEq, Eq)]
+pub enum RpcErrorType {
+    AlreadyProcessed,
+    DuplicateSignature,
+    BlockhashNotFound,
+    RateLimited,
+    Other(String),
+}
+
+/// Classify a ClientError into an RpcErrorType for consistent handling
+pub fn classify_rpc_error(error: &ClientError) -> RpcErrorType {
+    match error.kind() {
+        ClientErrorKind::RpcError(rpc_error) => match rpc_error {
+            RpcError::RpcResponseError { message, .. } => {
+                let msg = message.to_lowercase();
+                if msg.contains("already processed") {
+                    RpcErrorType::AlreadyProcessed
+                } else if msg.contains("duplicate signature") {
+                    RpcErrorType::DuplicateSignature
+                } else if msg.contains("blockhash not found") {
+                    RpcErrorType::BlockhashNotFound
+                } else if msg.contains("rate limit") || msg.contains("too many requests") {
+                    RpcErrorType::RateLimited
+                } else {
+                    RpcErrorType::Other(message.clone())
+                }
+            }
+            _ => RpcErrorType::Other("Unknown RPC error".to_string()),
+        },
+        _ => RpcErrorType::Other(error.to_string()),
+    }
+}
 
 /// Endpoint performance metrics for adaptive ranking
 #[derive(Debug, Clone)]
@@ -154,7 +186,7 @@ impl RpcBroadcaster for RpcManager {
     fn send_on_many_rpc<'a>(
         &'a self,
         txs: Vec<VersionedTransaction>,
-        correlation_id: Option<CorrelationId>,
+        _correlation_id: Option<CorrelationId>,
     ) -> Pin<Box<dyn Future<Output = Result<Signature>> + Send + 'a>> {
         Box::pin(async move {
             if self.endpoints.is_empty() || txs.is_empty() {

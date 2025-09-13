@@ -5,7 +5,6 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
-use uuid::Uuid;
 
 /// Global correlation ID counter for unique transaction tracking
 static CORRELATION_COUNTER: AtomicU64 = AtomicU64::new(1);

@@ -332,7 +332,9 @@ impl BuyEngine {
             self.pending_buy.store(false, Ordering::Relaxed);
         });
 
-
+        // Call the actual buy logic
+        self.try_buy(candidate, PipelineContext::default()).await
+    }
 
     async fn try_buy(&self, candidate: PremintCandidate, ctx: PipelineContext) -> Result<Signature> {
         let mut acquired_indices: Vec<usize> = Vec::new();

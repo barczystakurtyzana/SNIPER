@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use crate::rpc_manager::BroadcastMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -58,14 +57,6 @@ pub struct Config {
     pub sniffer_mode: SnifferMode,
     
     // Broadcast configuration
-    #[serde(default)]
-    pub broadcast_mode: BroadcastMode,
-    #[serde(default = "default_rpc_timeout_secs")]
-    pub rpc_timeout_secs: u64,
-    #[serde(default = "default_max_retries")]
-    pub max_retries: u32,
-
-    // RPC Broadcasting Configuration
     #[serde(default)]
     pub broadcast_mode: BroadcastMode,
     #[serde(default = "default_rpc_timeout_sec")]

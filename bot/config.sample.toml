@@ -1,0 +1,29 @@
+# Example configuration for TransactionBuilder
+
+priority_fee_lamports = 10000
+compute_unit_limit = 200000
+buy_amount_lamports = 10000000
+slippage_percent = 10.0
+
+rpc_endpoints = [
+  "https://api.mainnet-beta.solana.com"
+]
+rpc_retry_attempts = 3
+rpc_timeout_ms = 8000
+
+# PumpPortal HTTP (optional)
+pumpportal_url = ""
+pumpportal_api_key = ""
+
+# LetsBonk HTTP (optional)
+letsbonk_api_url = ""
+letsbonk_api_key = ""
+
+jito_bundle_enabled = false
+# signer_keypair_index = 0  # Optional: specify keypair index for multi-signer wallets
+nonce_count = 5
+
+# Empty means allow all. Otherwise list explicit program IDs.
+allowed_programs = [
+  # "So11111111111111111111111111111111111111112"
+]

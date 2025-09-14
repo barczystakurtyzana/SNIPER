@@ -6,6 +6,9 @@ edition = "2021"
 [features]
 default = []
 mock-mode = []
+pumpfun = []
+raydium = []
+orca = []
 
 [dependencies]
 anyhow = "1"
@@ -24,23 +27,28 @@ fastrand = "2"
 bs58 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
 
-
-# GUI
-eframe = { version = "0.27" }
-
-# HTTP client and rate limiting for quantum selector
+# HTTP / rate limiting / retries / logging
 reqwest = { version = "0.11", features = ["json"] }
 governor = "0.6"
 nonempty = "0.10"
 tokio-retry = "0.3"
 log = "0.4"
-spl-token = "4.0"
 
-# Solana (dopasuj do swojej wersji toolchaina; poniższe są przykładowe)
+# Solana + SPL
 solana-client = "1.18.14"
 solana-sdk = "1.18.14"
 solana-transaction-status = "1.18.14"
+spl-associated-token-account = "7.0.0"
+spl-token = "4.0"
+
+# DEX SDKs (optional)
+pumpfun = { version = "4.0.0", features = ["create-ata", "versioned-tx", "close-ata"], optional = true }
+raydium-sdk-v2 = { version = "0.0.9", optional = true }
+orca_whirlpools = { version = "5.0.0", optional = true }
+
+# Utils
+base64 = "0.22.1"
+eframe = { version = "0.27" }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tempfile = "3"

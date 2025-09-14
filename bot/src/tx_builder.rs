@@ -1,3 +1,4 @@
+//! tx_builder.rs
 //! Production-ready TransactionBuilder for Solana sniper bot
 //! - supports pump.fun integration (via `pumpfun` crate if enabled, or HTTP PumpPortal/Moralis fallback)
 //! - supports LetsBonk (external HTTP provider) for liquidity/quote lookup
@@ -6,6 +7,19 @@
 //! - signs VersionedTransaction via WalletManager
 //! - prepares simple Jito bundle wrapper (struct) for later submission
 //! - careful logging and safe fallbacks (memo fallback when no program integration)
+//
+// Integration with other components:
+// - WalletManager for signing and public key
+// - NonceManager for parallel transaction preparation
+// - RpcBroadcaster for transaction broadcasting
+// - Security validator for pre-transaction checks
+// - supports pump.fun integration (via `pumpfun` crate if enabled, or HTTP PumpPortal/Moralis fallback)
+// - supports LetsBonk (external HTTP provider) for liquidity/quote lookup
+// - validates config values
+// - retry/backoff + multi-RPC fallback for blockhash
+// - signs VersionedTransaction via WalletManager
+// - prepares simple Jito bundle wrapper (struct) for later submission
+// - careful logging and safe fallbacks (memo fallback when no program integration
 
 use anyhow::anyhow;
 use reqwest::Client;
@@ -37,7 +51,17 @@ use crate::wallet::WalletManager;
 
 // Optional integration: `pumpfun` crate
 #[cfg(feature = "pumpfun")]
-use pumpfun::PumpFun;
+use pumpfun::{accounts::BondingCurveAccount, common::types::{Cluster, PriorityFee}, PumpFun};
+
+// Optional integrations: Raydium/Orca (behind feature flags)
+#[cfg(feature = "raydium")]
+use raydium_sdk_v2::AmmSwapClient;
+#[cfg(feature = "orca")]
+use orca_whirlpools::{SwapInput, WhirlpoolClient};
+
+use spl_associated_token_account::get_associated_token_address;
+use spl_token::id as token_program_id;
+use spl_token::instruction::close_account;
 
 // Configuration
 
@@ -49,8 +73,8 @@ pub struct TransactionConfig {
     pub compute_unit_limit: u32,
     /// Amount to buy in SOL lamports
     pub buy_amount_lamports: u64,
-    /// Slippage tolerance percentage (0.0..=100.0)
-    pub slippage_percent: f64,
+    /// Slippage tolerance in basis points (bps, 100 = 1%)
+    pub slippage_bps: u64,
     /// RPC endpoints for rotation/fallback
     pub rpc_endpoints: Vec<String>,
     /// Max attempts per endpoint
@@ -71,6 +95,9 @@ pub struct TransactionConfig {
     pub nonce_count: usize,
     /// Allowlist of programs (empty = allow all)
     pub allowed_programs: Vec<Pubkey>,
+    /// Cluster configuration for pumpfun SDK
+    #[cfg(feature = "pumpfun")]
+    pub cluster: Cluster,
 }
 
 impl Default for TransactionConfig {
@@ -79,7 +106,7 @@ impl Default for TransactionConfig {
             priority_fee_lamports: 10_000,
             compute_unit_limit: 200_000,
             buy_amount_lamports: 10_000_000,
-            slippage_percent: 10.0,
+            slippage_bps: 1000, // 10%
             rpc_endpoints: vec!["https://api.mainnet-beta.solana.com".to_string()],
             rpc_retry_attempts: 3,
             rpc_timeout_ms: 8_000,
@@ -91,6 +118,8 @@ impl Default for TransactionConfig {
             signer_keypair_index: None,
             nonce_count: 5,
             allowed_programs: vec![],
+            #[cfg(feature = "pumpfun")]
+            cluster: Cluster::mainnet(Default::default(), Default::default()),
         }
     }
 }
@@ -102,9 +131,9 @@ impl TransactionConfig {
                 "buy_amount_lamports must be > 0".to_string(),
             ));
         }
-        if !(0.0..=100.0).contains(&self.slippage_percent) {
+        if self.slippage_bps > 10000 {
             return Err(TransactionBuilderError::ConfigValidation(
-                "slippage_percent must be in 0.0..=100.0".to_string(),
+                "slippage_bps must be <= 10000".to_string(),
             ));
         }
         if self.rpc_endpoints.is_empty() {
@@ -152,16 +181,17 @@ pub enum TransactionBuilderError {
     Serialization(String),
     #[error("Program {0} is not allowed by configuration")]
     ProgramNotAllowed(Pubkey),
+    #[error("Feature not enabled: {feature} for {action}")]
+    FeatureNotEnabled { feature: String, action: String },
 }
 
-// Supported DEX programs
+// Supported DEX programs (Meteora removed)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DexProgram {
     PumpFun,
     LetsBonk,
     Raydium,
     Orca,
-    Meteora,
     Unknown(String),
 }
 
@@ -172,7 +202,6 @@ impl From<&str> for DexProgram {
             "letsbonk.fun" | "letsbonk" | "bonk" => DexProgram::LetsBonk,
             "raydium" => DexProgram::Raydium,
             "orca" => DexProgram::Orca,
-            "meteora" => DexProgram::Meteora,
             _ => DexProgram::Unknown(s.to_string()),
         }
     }
@@ -189,18 +218,21 @@ pub struct TransactionBuilder {
     blockhash_cache_ttl: Duration,
     nonce_manager: Arc<NonceManager>,
     rpc_clients: Vec<Arc<RpcClient>>,
+    #[cfg(feature = "pumpfun")]
+    pumpfun_client: PumpFun,
 }
 
 impl TransactionBuilder {
-    pub fn new(
+    pub async fn new(
         wallet: Arc<WalletManager>,
         rpc_endpoints: Vec<String>,
         nonce_manager: Arc<NonceManager>,
-    ) -> Self {
+        config: &TransactionConfig,
+    ) -> Result<Self, TransactionBuilderError> {
         let http = Client::builder()
-            .timeout(Duration::from_millis(8000))
+            .timeout(Duration::from_millis(config.rpc_timeout_ms))
             .build()
-            .expect("Failed to create HTTP client");
+            .map_err(|e| TransactionBuilderError::RpcConnection(e.to_string()))?;
 
         // Pre-initialize RPC clients for connection pooling
         let rpc_clients = rpc_endpoints
@@ -208,12 +240,20 @@ impl TransactionBuilder {
             .map(|endpoint| {
                 Arc::new(RpcClient::new_with_timeout(
                     endpoint.clone(),
-                    Duration::from_millis(8000),
+                    Duration::from_millis(config.rpc_timeout_ms),
                 ))
             })
             .collect();
 
-        Self {
+        #[cfg(feature = "pumpfun")]
+        let pumpfun_client = PumpFun::new(wallet.clone(), config.cluster.clone()).await.map_err(
+            |e| TransactionBuilderError::InstructionBuild {
+                program: "pumpfun".to_string(),
+                reason: e.to_string(),
+            },
+        )?;
+
+        Ok(Self {
             wallet,
             http,
             rpc_endpoints: rpc_endpoints.clone(),
@@ -222,7 +262,9 @@ impl TransactionBuilder {
             blockhash_cache_ttl: Duration::from_secs(15),
             nonce_manager,
             rpc_clients,
-        }
+            #[cfg(feature = "pumpfun")]
+            pumpfun_client,
+        })
     }
 
     pub async fn get_recent_blockhash(
@@ -329,7 +371,6 @@ impl TransactionBuilder {
             DexProgram::LetsBonk => self.build_letsbonk_instruction(candidate, config).await,
             DexProgram::Raydium => self.build_raydium_instruction(candidate, config).await,
             DexProgram::Orca => self.build_orca_instruction(candidate, config).await,
-            DexProgram::Meteora => self.build_meteora_instruction(candidate, config).await,
             DexProgram::Unknown(_) => self.build_placeholder_buy_instruction(candidate, config).await,
         }?;
 
@@ -410,9 +451,6 @@ impl TransactionBuilder {
                 self.build_raydium_sell_instruction(mint, sell_percent, config).await
             }
             DexProgram::Orca => self.build_orca_sell_instruction(mint, sell_percent, config).await,
-            DexProgram::Meteora => {
-                self.build_meteora_sell_instruction(mint, sell_percent, config).await
-            }
             DexProgram::Unknown(_) => {
                 self.build_placeholder_sell_instruction(mint, sell_percent, config).await
             }
@@ -475,16 +513,53 @@ impl TransactionBuilder {
     ) -> Result<Instruction, TransactionBuilderError> {
         #[cfg(feature = "pumpfun")]
         {
-            match Self::try_build_pumpfun_instruction(self.wallet.clone(), candidate, config).await
-            {
-                Ok(ix) => return Ok(ix),
-                Err(e) => {
-                    warn!("Pumpfun crate build failed: {}", e);
-                    // Fall through to HTTP builder
-                }
+            // Pobierz bonding curve do obliczeń slippage
+            let bonding_curve = self
+                .pumpfun_client
+                .get_bonding_curve(candidate.mint)
+                .await
+                .map_err(|e| TransactionBuilderError::InstructionBuild {
+                    program: "pumpfun".to_string(),
+                    reason: e.to_string(),
+                })?;
+
+            let expected_tokens =
+                calculate_expected_tokens(&bonding_curve, config.buy_amount_lamports);
+            let min_token_out = ((expected_tokens as u128)
+                * (10000u128 - config.slippage_bps as u128)
+                / 10000u128) as u64;
+
+            // Buduj tx i wyciągnij instrukcję buy (ostatnia w tx)
+            let priority_fee = PriorityFee {
+                unit_limit: Some(config.compute_unit_limit as u64),
+                unit_price: Some(config.priority_fee_lamports),
+                ..Default::default()
+            };
+            let tx = self
+                .pumpfun_client
+                .buy(
+                    candidate.mint,
+                    config.buy_amount_lamports,
+                    Some(min_token_out),
+                    Some(priority_fee),
+                )
+                .await
+                .map_err(|e| TransactionBuilderError::InstructionBuild {
+                    program: "pumpfun".to_string(),
+                    reason: e.to_string(),
+                })?;
+
+            if let Some(ix) = tx.message.instructions.last() {
+                return Ok(ix.clone());
+            } else {
+                return Err(TransactionBuilderError::InstructionBuild {
+                    program: "pumpfun".to_string(),
+                    reason: "No instruction in tx".to_string(),
+                });
             }
         }
 
+        // Fallback do HTTP PumpPortal, gdy feature pumpfun wyłączony
         self.build_pumpportal_or_memo(candidate, config).await
     }
 
@@ -497,7 +572,7 @@ impl TransactionBuilder {
             let payload = serde_json::json!({
                 "mint": candidate.mint.to_string(),
                 "amount": config.buy_amount_lamports,
-                "slippage": config.slippage_percent,
+                "slippage": config.slippage_bps as f64 / 100.0,
                 "payer": self.wallet.pubkey().to_string(),
             });
 
@@ -514,7 +589,6 @@ impl TransactionBuilder {
                             reason: format!("JSON parse error: {}", e),
                         }
                     })?;
-
                     return self.parse_external_api_response(&j, "letsbonk", config);
                 }
                 Ok(resp) => {
@@ -534,8 +608,54 @@ impl TransactionBuilder {
         candidate: &PremintCandidate,
         config: &TransactionConfig,
     ) -> Result<Instruction, TransactionBuilderError> {
-        // TODO: Implement real Raydium instruction building
-        self.build_placeholder_buy_instruction(candidate, config).await
+        #[cfg(feature = "raydium")]
+        {
+            let sol_mint =
+                Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
+            let raydium_client = AmmSwapClient::new(
+                self.rpc_client_for(0).clone(),
+                sol_mint,
+                candidate.mint,
+                self.wallet.clone(),
+            );
+
+            let expected_tokens = raydium_client
+                .get_swap_amount_out(config.buy_amount_lamports, true) // true = SOL -> token
+                .await
+                .map_err(|e| TransactionBuilderError::InstructionBuild {
+                    program: "raydium".to_string(),
+                    reason: e.to_string(),
+                })?;
+
+            let min_token_out = ((expected_tokens as u128)
+                * (10000u128 - config.slippage_bps as u128)
+                / 10000u128) as u64;
+
+            let tx = raydium_client
+                .swap(config.buy_amount_lamports, min_token_out, true)
+                .await
+                .map_err(|e| TransactionBuilderError::InstructionBuild {
+                    program: "raydium".to_string(),
+                    reason: e.to_string(),
+                })?;
+
+            if let Some(ix) = tx.message.instructions.last() {
+                return Ok(ix.clone());
+            } else {
+                return Err(TransactionBuilderError::InstructionBuild {
+                    program: "raydium".to_string(),
+                    reason: "No instruction in tx".to_string(),
+                });
+            }
+        }
+
+        #[cfg(not(feature = "raydium"))]
+        {
+            Err(TransactionBuilderError::FeatureNotEnabled {
+                feature: "raydium".to_string(),
+                action: "Raydium buy instruction".to_string(),
+            })
+        }
     }
 
     async fn build_orca_instruction(
@@ -543,17 +663,55 @@ impl TransactionBuilder {
         candidate: &PremintCandidate,
         config: &TransactionConfig,
     ) -> Result<Instruction, TransactionBuilderError> {
-        // TODO: Implement real Orca instruction building
-        self.build_placeholder_buy_instruction(candidate, config).await
-    }
+        #[cfg(feature = "orca")]
+        {
+            let client = WhirlpoolClient::new(self.rpc_client_for(0).clone());
+            let whirlpool_address = client.derive_whirlpool_pda(
+                Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap(),
+                candidate.mint,
+            );
+            let whirlpool = client
+                .get_whirlpool(&whirlpool_address)
+                .await
+                .map_err(|e| TransactionBuilderError::InstructionBuild {
+                    program: "orca".to_string(),
+                    reason: e.to_string(),
+                })?;
 
-    async fn build_meteora_instruction(
-        &self,
-        candidate: &PremintCandidate,
-        config: &TransactionConfig,
-    ) -> Result<Instruction, TransactionBuilderError> {
-        // TODO: Implement real Meteora instruction building
-        self.build_placeholder_buy_instruction(candidate, config).await
+            let quote = client
+                .swap_quote_a_to_b(config.buy_amount_lamports, false, &whirlpool) // false => exact in
+                .await
+                .map_err(|e| TransactionBuilderError::InstructionBuild {
+                    program: "orca".to_string(),
+                    reason: e.to_string(),
+                })?;
+
+            let min_token_out = ((quote.amount_out as u128)
+                * (10000u128 - config.slippage_bps as u128)
+                / 10000u128) as u64;
+
+            let swap_input = SwapInput {
+                amount: config.buy_amount_lamports,
+                other_amount_threshold: min_token_out,
+                sqrt_price_limit: quote.sqrt_price_limit,
+                amount_specified_is_input: true,
+                a_to_b: true,
+            };
+
+            let ix = client
+                .build_swap_ix(&whirlpool_address, &swap_input, &self.wallet.pubkey())
+                .instruction;
+
+            Ok(ix)
+        }
+
+        #[cfg(not(feature = "orca"))]
+        {
+            Err(TransactionBuilderError::FeatureNotEnabled {
+                feature: "orca".to_string(),
+                action: "Orca buy instruction".to_string(),
+            })
+        }
     }
 
     async fn build_pumpportal_or_memo(
@@ -565,7 +723,7 @@ impl TransactionBuilder {
             let payload = serde_json::json!({
                 "mint": candidate.mint.to_string(),
                 "buy_amount": config.buy_amount_lamports,
-                "slippage": config.slippage_percent,
+                "slippage": config.slippage_bps as f64 / 100.0,
                 "payer": self.wallet.pubkey().to_string(),
             });
 
@@ -608,14 +766,18 @@ impl TransactionBuilder {
         if let Some(obj) = j.as_object() {
             // Prefer program_id + data format
             if let (Some(pid_val), Some(data_val)) = (obj.get("program_id"), obj.get("data")) {
-                let pid_str = pid_val.as_str().ok_or_else(|| TransactionBuilderError::InstructionBuild {
-                    program: api_name.to_string(),
-                    reason: "program_id not string".to_string(),
+                let pid_str = pid_val.as_str().ok_or_else(|| {
+                    TransactionBuilderError::InstructionBuild {
+                        program: api_name.to_string(),
+                        reason: "program_id not string".to_string(),
+                    }
                 })?;
 
-                let pid = Pubkey::from_str(pid_str).map_err(|e| TransactionBuilderError::InstructionBuild {
-                    program: api_name.to_string(),
-                    reason: format!("invalid program_id: {}", e),
+                let pid = Pubkey::from_str(pid_str).map_err(|e| {
+                    TransactionBuilderError::InstructionBuild {
+                        program: api_name.to_string(),
+                        reason: format!("invalid program_id: {}", e),
+                    }
                 })?;
 
                 // Check if program is allowed
@@ -623,14 +785,18 @@ impl TransactionBuilder {
                     return Err(TransactionBuilderError::ProgramNotAllowed(pid));
                 }
 
-                let data_b64 = data_val.as_str().ok_or_else(|| TransactionBuilderError::InstructionBuild {
-                    program: api_name.to_string(),
-                    reason: "data not string".to_string(),
+                let data_b64 = data_val.as_str().ok_or_else(|| {
+                    TransactionBuilderError::InstructionBuild {
+                        program: api_name.to_string(),
+                        reason: "data not string".to_string(),
+                    }
                 })?;
 
-                let data = base64::decode(data_b64).map_err(|e| TransactionBuilderError::InstructionBuild {
-                    program: api_name.to_string(),
-                    reason: format!("base64 decode error: {}", e),
+                let data = base64::decode(data_b64).map_err(|e| {
+                    TransactionBuilderError::InstructionBuild {
+                        program: api_name.to_string(),
+                        reason: format!("base64 decode error: {}", e),
+                    }
                 })?;
 
                 // Validate data size
@@ -657,9 +823,11 @@ impl TransactionBuilder {
                     "{} returned legacy instruction_b64 format - consider updating API",
                     api_name
                 );
-                let data = base64::decode(b64).map_err(|e| TransactionBuilderError::InstructionBuild {
-                    program: api_name.to_string(),
-                    reason: format!("base64 decode error: {}", e),
+                let data = base64::decode(b64).map_err(|e| {
+                    TransactionBuilderError::InstructionBuild {
+                        program: api_name.to_string(),
+                        reason: format!("base64 decode error: {}", e),
+                    }
                 })?;
 
                 // Validate data size
@@ -688,16 +856,20 @@ impl TransactionBuilder {
         accounts_val: &serde_json::Value,
         api_name: &str,
     ) -> Result<Vec<AccountMeta>, TransactionBuilderError> {
-        let accounts_array = accounts_val.as_array().ok_or_else(|| TransactionBuilderError::InstructionBuild {
-            program: api_name.to_string(),
-            reason: "accounts not an array".to_string(),
+        let accounts_array = accounts_val.as_array().ok_or_else(|| {
+            TransactionBuilderError::InstructionBuild {
+                program: api_name.to_string(),
+                reason: "accounts not an array".to_string(),
+            }
         })?;
 
         let mut accounts = Vec::with_capacity(accounts_array.len());
         for account_val in accounts_array {
-            let account_obj = account_val.as_object().ok_or_else(|| TransactionBuilderError::InstructionBuild {
-                program: api_name.to_string(),
-                reason: "account entry not an object".to_string(),
+            let account_obj = account_val.as_object().ok_or_else(|| {
+                TransactionBuilderError::InstructionBuild {
+                    program: api_name.to_string(),
+                    reason: "account entry not an object".to_string(),
+                }
             })?;
 
             let pubkey_str = account_obj
@@ -708,9 +880,11 @@ impl TransactionBuilder {
                     reason: "account pubkey missing or not string".to_string(),
                 })?;
 
-            let pubkey = Pubkey::from_str(pubkey_str).map_err(|e| TransactionBuilderError::InstructionBuild {
-                program: api_name.to_string(),
-                reason: format!("invalid account pubkey: {}", e),
+            let pubkey = Pubkey::from_str(pubkey_str).map_err(|e| {
+                TransactionBuilderError::InstructionBuild {
+                    program: api_name.to_string(),
+                    reason: format!("invalid account pubkey: {}", e),
+                }
             })?;
 
             let is_signer = account_obj
@@ -778,6 +952,57 @@ impl TransactionBuilder {
         sell_percent: f64,
         config: &TransactionConfig,
     ) -> Result<Instruction, TransactionBuilderError> {
+        #[cfg(feature = "pumpfun")]
+        {
+            let ata = get_associated_token_address(&self.wallet.pubkey(), mint);
+            let token_balance = self
+                .pumpfun_client
+                .get_token_balance(ata)
+                .await
+                .map_err(|e| TransactionBuilderError::InstructionBuild {
+                    program: "pumpfun".to_string(),
+                    reason: e.to_string(),
+                })?
+                .unwrap_or(0);
+            let sell_amount = ((token_balance as f64) * sell_percent) as u64;
+
+            let bonding_curve = self
+                .pumpfun_client
+                .get_bonding_curve(*mint)
+                .await
+                .map_err(|e| TransactionBuilderError::InstructionBuild {
+                    program: "pumpfun".to_string(),
+                    reason: e.to_string(),
+                })?;
+            let expected_sol = calculate_expected_sol(&bonding_curve, sell_amount);
+            let min_sol_out = ((expected_sol as u128)
+                * (10000u128 - config.slippage_bps as u128)
+                / 10000u128) as u64;
+
+            let priority_fee = PriorityFee {
+                unit_limit: Some(config.compute_unit_limit as u64),
+                unit_price: Some(config.priority_fee_lamports),
+                ..Default::default()
+            };
+            let tx = self
+                .pumpfun_client
+                .sell(*mint, Some(sell_amount), Some(min_sol_out), Some(priority_fee))
+                .await
+                .map_err(|e| TransactionBuilderError::InstructionBuild {
+                    program: "pumpfun".to_string(),
+                    reason: e.to_string(),
+                })?;
+
+            if let Some(ix) = tx.message.instructions.last() {
+                return Ok(ix.clone());
+            } else {
+                return Err(TransactionBuilderError::InstructionBuild {
+                    program: "pumpfun".to_string(),
+                    reason: "No instruction in tx".to_string(),
+                });
+            }
+        }
+
         self.build_placeholder_sell_instruction(mint, sell_percent, config)
             .await
     }
@@ -812,45 +1037,56 @@ impl TransactionBuilder {
             .await
     }
 
-    async fn build_meteora_sell_instruction(
+    /// Unwrap WSOL ATA back to native SOL
+    pub async fn unwrap_wsol(
         &self,
-        mint: &Pubkey,
-        sell_percent: f64,
         config: &TransactionConfig,
-    ) -> Result<Instruction, TransactionBuilderError> {
-        self.build_placeholder_sell_instruction(mint, sell_percent, config)
-            .await
-    }
+    ) -> Result<Signature, TransactionBuilderError> {
+        let wsol_mint = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
+        let wsol_ata = get_associated_token_address(&self.wallet.pubkey(), &wsol_mint);
 
-    #[cfg(feature = "pumpfun")]
-    async fn try_build_pumpfun_instruction(
-        wallet: Arc<WalletManager>,
-        candidate: &PremintCandidate,
-        config: &TransactionConfig,
-    ) -> Result<Instruction, TransactionBuilderError> {
-        // Example implementation - adapt to actual pumpfun crate interface
-        let pf = PumpFun::new();
-        pf.get_buy_instruction(
-            &candidate.mint,
-            config.buy_amount_lamports,
-            config.slippage_percent,
+        let close_ix = close_account(
+            &token_program_id(),
+            &wsol_ata,
+            &self.wallet.pubkey(),
+            &self.wallet.pubkey(),
+            &[],
         )
         .map_err(|e| TransactionBuilderError::InstructionBuild {
-            program: "pumpfun".to_string(),
-            reason: format!("Pumpfun error: {}", e),
-        })
-    }
+            program: "unwrap_wsol".to_string(),
+            reason: e.to_string(),
+        })?;
 
-    #[cfg(not(feature = "pumpfun"))]
-    async fn try_build_pumpfun_instruction(
-        _wallet: Arc<WalletManager>,
-        _candidate: &PremintCandidate,
-        _config: &TransactionConfig,
-    ) -> Result<Instruction, TransactionBuilderError> {
-        Err(TransactionBuilderError::InstructionBuild {
-            program: "pumpfun".to_string(),
-            reason: "Pumpfun feature not enabled".to_string(),
-        })
+        let recent_blockhash = self.get_recent_blockhash(config).await?;
+
+        let instructions = vec![close_ix];
+        let payer = self.wallet.pubkey();
+        let message_v0 = MessageV0::try_compile(&payer, &instructions, &[], recent_blockhash)
+            .map_err(|e| TransactionBuilderError::InstructionBuild {
+                program: "unwrap_wsol".to_string(),
+                reason: format!("Failed to compile message: {}", e),
+            })?;
+
+        let versioned_message = VersionedMessage::V0(message_v0);
+        let tx = VersionedTransaction {
+            signatures: vec![],
+            message: versioned_message,
+        };
+
+        let signed_tx = self
+            .wallet
+            .sign_versioned_transaction(tx, config.signer_keypair_index)
+            .await
+            .map_err(|e| TransactionBuilderError::SigningFailed(e.to_string()))?;
+
+        // Simple send via first RPC client
+        let rpc = self.rpc_client_for(0);
+        let signature = rpc
+            .send_and_confirm_transaction(&signed_tx)
+            .await
+            .map_err(|e| TransactionBuilderError::RpcConnection(e.to_string()))?;
+
+        Ok(signature)
     }
 
     /// Test helper: inject a fresh blockhash to avoid RPC calls in unit/integration tests.
@@ -859,6 +1095,21 @@ impl TransactionBuilder {
         let mut cache = self.blockhash_cache.write().await;
         *cache = Some((std::time::Instant::now(), hash));
     }
+}
+
+// Pomocnicze funkcje obliczeniowe dla pump.fun
+#[cfg(feature = "pumpfun")]
+fn calculate_expected_tokens(curve: &BondingCurveAccount, sol_in: u64) -> u64 {
+    let virtual_sol = curve.virtual_sol_reserves;
+    let virtual_tokens = curve.virtual_token_reserves;
+    (sol_in * virtual_tokens) / (virtual_sol + sol_in)
+}
+
+#[cfg(feature = "pumpfun")]
+fn calculate_expected_sol(curve: &BondingCurveAccount, tokens_in: u64) -> u64 {
+    let virtual_sol = curve.virtual_sol_reserves;
+    let virtual_tokens = curve.virtual_token_reserves;
+    (tokens_in * virtual_sol) / (virtual_tokens + tokens_in)
 }
 
 // SPL Memo helper

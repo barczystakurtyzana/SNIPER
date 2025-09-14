@@ -1,4 +1,3 @@
-//! tx_builder.rs
 //! Production-ready TransactionBuilder for Solana sniper bot
 //! - supports pump.fun integration (via `pumpfun` crate if enabled, or HTTP PumpPortal/Moralis fallback)
 //! - supports LetsBonk (external HTTP provider) for liquidity/quote lookup

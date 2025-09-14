@@ -96,7 +96,7 @@ pub struct PredictiveOracle {
     pub rpc_clients: NonEmpty<Arc<RpcClient>>,
     pub http_client: Client,
     pub config: OracleConfig,
-    pub token_cache: RwLock<HashMap<Pubkey, (Instant, TokenData)>>,
+    pub token_cache: Arc<RwLock<HashMap<Pubkey, (Instant, TokenData)>>>,
     pub metrics: Arc<RwLock<OracleMetrics>>,
     pub rate_limiter: Arc<DefaultDirectRateLimiter>,
     pub request_semaphore: Arc<Semaphore>,
@@ -110,7 +110,7 @@ struct OracleScorer {
     rpc_clients: NonEmpty<Arc<RpcClient>>,
     http_client: Client,
     config: OracleConfig,
-    token_cache: RwLock<HashMap<Pubkey, (Instant, TokenData)>>,
+    token_cache: Arc<RwLock<HashMap<Pubkey, (Instant, TokenData)>>>,
     metrics: Arc<RwLock<OracleMetrics>>,
     rate_limiter: Arc<DefaultDirectRateLimiter>,
 }
@@ -211,7 +211,7 @@ impl PredictiveOracle {
         scored_sender: mpsc::Sender<ScoredCandidate>,
         config: OracleConfig,
     ) -> Result<Self> {
-        let rpc_clients = config.rpc_endpoints
+        let rpc_clients = config.rpc_endpoints.clone()
             .map(|endpoint| {
                 let client = RpcClient::new_with_timeout(
                     endpoint,
@@ -235,7 +235,7 @@ impl PredictiveOracle {
                 .timeout(Duration::from_secs(10))
                 .build()?,
             config,
-            token_cache: RwLock::new(HashMap::new()),
+            token_cache: Arc::new(RwLock::new(HashMap::new())),
             metrics: Arc::new(RwLock::new(OracleMetrics::default())),
             rate_limiter,
             request_semaphore,
@@ -744,7 +744,7 @@ impl PredictiveOracle {
     fn calculate_liquidity_score(&self, token_data: &TokenData) -> f64 {
         let liquidity = token_data.liquidity_pool.as_ref().map_or(0.0, |p| p.sol_amount);
         let normalized = liquidity / self.config.thresholds.min_liquidity_sol;
-        min(normalized, 1.0)
+        normalized.min(1.0)
     }
 
     fn calculate_holder_distribution_score(&self, token_data: &TokenData) -> f64 {
@@ -854,7 +854,7 @@ impl PredictiveOracle {
 
     fn calculate_social_score(&self, token_data: &TokenData) -> f64 {
         let social = &token_data.social_activity;
-        let mut score = 0.0;
+        let mut score: f64 = 0.0;
         
         if social.twitter_mentions > 10 {
             score += 0.3;

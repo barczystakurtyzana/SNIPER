@@ -6,9 +6,12 @@ edition = "2021"
 [features]
 default = []
 mock-mode = []
-pumpfun = []
-raydium = []
-orca = []
+# Map features to optional deps (required for cargo to resolve metadata)
+pumpfun = ["dep:pumpfun"]
+raydium = ["dep:raydium-sdk-v2"]
+orca = ["dep:orca_whirlpools"]
+# Convenience meta-feature (optional)
+dex-all = ["pumpfun", "raydium", "orca"]
 
 [dependencies]
 anyhow = "1"

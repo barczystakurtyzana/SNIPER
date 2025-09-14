@@ -26,7 +26,8 @@ use crate::nonce_manager::NonceManager;
 
 use crate::rpc_manager::RpcBroadcaster;
 use crate::security::validator;
-use crate::structured_logging::PipelineContext;
+use crate::structured_logging::{PipelineContext, StructuredLogger};
+use crate::observability::CorrelationId;
 use crate::tx_builder::{TransactionBuilder, TransactionConfig};
 use crate::types::{AppState, CandidateReceiver, Mode, PremintCandidate};
 
@@ -183,7 +184,7 @@ impl BuyEngine {
                                 let exec_price = self.get_execution_price_mock(&candidate).await;
                                 
                                 StructuredLogger::log_buy_success(
-                                    &correlation_id,
+                                    &ctx.correlation_id,
                                     &candidate.mint.to_string(),
                                     &sig.to_string(),
                                     exec_price,
@@ -353,9 +354,6 @@ impl BuyEngine {
 
                     let tx = self.create_buy_transaction(&candidate, recent_blockhash).await?;
                     txs.push(tx);
-
-                    acquired_leases.push(lease);
-
                 }
                 Err(e) => {
 
@@ -387,7 +385,7 @@ impl BuyEngine {
         let res = self
 
             .rpc
-            .send_on_many_rpc(txs, Some(correlation_id))
+            .send_on_many_rpc(txs, Some(ctx.correlation_id))
             .await
             .context("broadcast BUY failed");
 

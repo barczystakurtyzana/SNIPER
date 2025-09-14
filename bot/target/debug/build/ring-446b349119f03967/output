@@ -1,3 +1,0 @@
-cargo:rustc-link-lib=static=ring-core
-cargo:rustc-link-lib=static=ring-test
-cargo:rustc-link-search=native=/home/runner/work/SNIPER/SNIPER/bot/target/debug/build/ring-446b349119f03967/out

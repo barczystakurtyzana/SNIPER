@@ -1,1 +1,0 @@
-Pin<Box<dyn Stream<Item = solana_client::rpc_response::Response<RpcLogsResponse>> + std::marker::Send>>

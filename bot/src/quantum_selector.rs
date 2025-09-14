@@ -52,7 +52,7 @@ pub struct ScoredCandidate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OracleConfig {
     pub weights: FeatureWeights,
-    pub rpc_endpoints: NonEmpty<String>,
+    pub rpc_endpoints: Vec<String>,
     pub pump_fun_api_key: Option<String>,
     pub bitquery_api_key: Option<String>,
     pub thresholds: ScoreThresholds,
@@ -115,7 +115,7 @@ struct OracleScorer {
     rate_limiter: Arc<DefaultDirectRateLimiter>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct OracleMetrics {
     pub total_scored: u64,
     pub avg_scoring_time: f64,
@@ -211,7 +211,11 @@ impl PredictiveOracle {
         scored_sender: mpsc::Sender<ScoredCandidate>,
         config: OracleConfig,
     ) -> Result<Self> {
-        let rpc_clients = config.rpc_endpoints.clone()
+        // Validate that rpc_endpoints is not empty and convert to NonEmpty
+        let rpc_endpoints_nonempty = NonEmpty::from_vec(config.rpc_endpoints.clone())
+            .ok_or_else(|| anyhow::anyhow!("rpc_endpoints cannot be empty"))?;
+            
+        let rpc_clients = rpc_endpoints_nonempty
             .map(|endpoint| {
                 let client = RpcClient::new_with_timeout(
                     endpoint,
@@ -998,7 +1002,7 @@ impl PredictiveOracle {
 
     // 9. Metody utility
     pub async fn get_metrics(&self) -> OracleMetrics {
-        self.metrics.read().await.clone()
+        (*self.metrics.read().await).clone()
     }
     
     pub async fn clear_cache(&self) {

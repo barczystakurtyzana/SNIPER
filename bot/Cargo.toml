@@ -8,10 +8,10 @@ default = []
 mock-mode = []
 # Map features to optional deps (required for cargo to resolve metadata)
 pumpfun = ["dep:pumpfun"]
-raydium = ["dep:raydium-sdk-v2"]
+# raydium = ["dep:raydium-sdk-V2"]  # Temporarily disabled due to version conflicts
 orca = ["dep:orca_whirlpools"]
 # Convenience meta-feature (optional)
-dex-all = ["pumpfun", "raydium", "orca"]
+dex-all = ["pumpfun", "orca"]  # Removed raydium from meta-feature
 
 [dependencies]
 anyhow = "1"
@@ -38,15 +38,15 @@ tokio-retry = "0.3"
 log = "0.4"
 
 # Solana + SPL
-solana-client = "1.18.14"
-solana-sdk = "1.18.14"
-solana-transaction-status = "1.18.14"
+solana-client = "2.3"
+solana-sdk = "2.3"
+solana-transaction-status = "2.3"
 spl-associated-token-account = "7.0.0"
-spl-token = "4.0"
+spl-token = "6.0"
 
 # DEX SDKs (optional)
-pumpfun = { version = "4.0.0", features = ["create-ata", "versioned-tx", "close-ata"], optional = true }
-raydium-sdk-v2 = { version = "0.0.9", optional = true }
+pumpfun = { version = "4.4.1", features = ["create-ata", "versioned-tx", "close-ata"], optional = true }
+# raydium-sdk-V2 = { version = "0.0.9", optional = true }  # Temporarily disabled due to Solana version conflicts
 orca_whirlpools = { version = "5.0.0", optional = true }
 
 # Utils

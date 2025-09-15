@@ -186,7 +186,7 @@ pub enum TransactionBuilderError {
 }
 
 // Supported DEX programs (Meteora removed)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DexProgram {
     PumpFun,
     LetsBonk,
@@ -391,10 +391,8 @@ impl TransactionBuilder {
         };
 
         if sign {
-            tx = self
-                .wallet
-                .sign_versioned_transaction(tx, config.signer_keypair_index)
-                .await
+            self.wallet
+                .sign_transaction(&mut tx)
                 .map_err(|e| TransactionBuilderError::SigningFailed(e.to_string()))?;
         } else {
             // Initialize with default signatures matching required number of signers
@@ -472,10 +470,8 @@ impl TransactionBuilder {
         };
 
         if sign {
-            tx = self
-                .wallet
-                .sign_versioned_transaction(tx, config.signer_keypair_index)
-                .await
+            self.wallet
+                .sign_transaction(&mut tx)
                 .map_err(|e| TransactionBuilderError::SigningFailed(e.to_string()))?;
         } else {
             let required = tx.message.header().num_required_signatures as usize;
@@ -605,8 +601,8 @@ impl TransactionBuilder {
 
     async fn build_raydium_instruction(
         &self,
-        candidate: &PremintCandidate,
-        config: &TransactionConfig,
+        _candidate: &PremintCandidate,
+        _config: &TransactionConfig,
     ) -> Result<Instruction, TransactionBuilderError> {
         #[cfg(feature = "raydium")]
         {
@@ -660,8 +656,8 @@ impl TransactionBuilder {
 
     async fn build_orca_instruction(
         &self,
-        candidate: &PremintCandidate,
-        config: &TransactionConfig,
+        _candidate: &PremintCandidate,
+        _config: &TransactionConfig,
     ) -> Result<Instruction, TransactionBuilderError> {
         #[cfg(feature = "orca")]
         {
@@ -1073,16 +1069,15 @@ impl TransactionBuilder {
             message: versioned_message,
         };
 
-        let signed_tx = self
-            .wallet
-            .sign_versioned_transaction(tx, config.signer_keypair_index)
-            .await
+        let mut tx_to_sign = tx;
+        self.wallet
+            .sign_transaction(&mut tx_to_sign)
             .map_err(|e| TransactionBuilderError::SigningFailed(e.to_string()))?;
 
         // Simple send via first RPC client
         let rpc = self.rpc_client_for(0);
         let signature = rpc
-            .send_and_confirm_transaction(&signed_tx)
+            .send_and_confirm_transaction(&tx_to_sign)
             .await
             .map_err(|e| TransactionBuilderError::RpcConnection(e.to_string()))?;
 

@@ -185,6 +185,8 @@ impl CandidateSource for HttpSource {
                                                 program: program_str.clone(),
                                                 slot,
                                                 timestamp: ts_ms / 1000,
+                                                instruction_summary: Some("HTTP mint".to_string()),
+                                                is_jito_bundle: None,
                                             }).await;
                                         }
                                     }

@@ -161,6 +161,8 @@ impl CandidateSource for WssSource {
                                                             program: program.to_string(),
                                                             slot,
                                                             timestamp: ts_ms / 1000,
+                                                            instruction_summary: Some("WSS mint".to_string()),
+                                                            is_jito_bundle: None,
                                                         }).await;
                                                         continue;
                                                     }
@@ -175,6 +177,8 @@ impl CandidateSource for WssSource {
                                             program: program.to_string(),
                                             slot,
                                             timestamp: ts_ms / 1000,
+                                            instruction_summary: Some("WSS mint".to_string()),
+                                            is_jito_bundle: None,
                                         }).await;
                                     }
                                     None => {

@@ -1,2 +1,4 @@
-target/
 Cargo.lock
+# Rust build artifacts
+target/
+**/target/

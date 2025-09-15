@@ -1,8 +1,0 @@
-/home/runner/work/SNIPER/SNIPER/bot/target/debug/deps/solana_config_program-67eb2cbf4da39e8e.d: /home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-config-program-1.18.26/src/lib.rs /home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-config-program-1.18.26/src/config_instruction.rs /home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-config-program-1.18.26/src/config_processor.rs /home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-config-program-1.18.26/src/date_instruction.rs
-
-/home/runner/work/SNIPER/SNIPER/bot/target/debug/deps/libsolana_config_program-67eb2cbf4da39e8e.rmeta: /home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-config-program-1.18.26/src/lib.rs /home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-config-program-1.18.26/src/config_instruction.rs /home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-config-program-1.18.26/src/config_processor.rs /home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-config-program-1.18.26/src/date_instruction.rs
-
-/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-config-program-1.18.26/src/lib.rs:
-/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-config-program-1.18.26/src/config_instruction.rs:
-/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-config-program-1.18.26/src/config_processor.rs:
-/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/solana-config-program-1.18.26/src/date_instruction.rs:

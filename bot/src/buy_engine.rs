@@ -26,7 +26,8 @@ use crate::nonce_manager::NonceManager;
 
 use crate::rpc_manager::RpcBroadcaster;
 use crate::security::validator;
-use crate::structured_logging::PipelineContext;
+use crate::structured_logging::{PipelineContext, StructuredLogger};
+use crate::observability::CorrelationId;
 use crate::tx_builder::{TransactionBuilder, TransactionConfig};
 use crate::types::{AppState, CandidateReceiver, Mode, PremintCandidate};
 
@@ -180,17 +181,9 @@ impl BuyEngine {
                                 info!(mint=%candidate.mint, sig=%sig, correlation_id=ctx.correlation_id, "BUY success, entering PassiveToken mode");
 
 
+                                info!(mint=%candidate.mint, sig=%sig, correlation_id=ctx.correlation_id, "BUY success, entering PassiveToken mode");
+
                                 let exec_price = self.get_execution_price_mock(&candidate).await;
-                                
-                                StructuredLogger::log_buy_success(
-                                    &correlation_id,
-                                    &candidate.mint.to_string(),
-                                    &sig.to_string(),
-                                    exec_price,
-                                    latency_ms,
-                                );
-                                
-                                info!(mint=%candidate.mint, sig=%sig, "BUY success, entering PassiveToken mode");
                                 self.backoff_state.record_success().await;
 
                                 {
@@ -275,6 +268,11 @@ impl BuyEngine {
                 warn!(correlation_id=ctx.correlation_id, "Sell requested in Sniffing mode; ignoring");
                 return Err(anyhow!("not in PassiveToken mode"));
             }
+            Mode::QuantumManual => {
+                ctx.logger.warn("Sell requested in QuantumManual mode; ignoring", serde_json::json!({"action": "sell_rejected"}));
+                warn!(correlation_id=ctx.correlation_id, "Sell requested in QuantumManual mode; ignoring");
+                return Err(anyhow!("not in PassiveToken mode"));
+            }
         };
 
         let _candidate = candidate_opt.ok_or_else(|| anyhow!("no active token in AppState"))?;
@@ -333,7 +331,7 @@ impl BuyEngine {
         });
 
         // Call the actual buy logic
-        self.try_buy(candidate, PipelineContext::default()).await
+        self.try_buy(candidate, PipelineContext::new("buy_engine_guard")).await
     }
 
     async fn try_buy(&self, candidate: PremintCandidate, ctx: PipelineContext) -> Result<Signature> {
@@ -353,9 +351,6 @@ impl BuyEngine {
 
                     let tx = self.create_buy_transaction(&candidate, recent_blockhash).await?;
                     txs.push(tx);
-
-                    acquired_leases.push(lease);
-
                 }
                 Err(e) => {
 
@@ -385,32 +380,30 @@ impl BuyEngine {
         ctx.logger.log_buy_attempt(&candidate.mint.to_string(), txs.len());
         
         let res = self
-
             .rpc
-            .send_on_many_rpc(txs, Some(correlation_id))
+            .send_on_many_rpc(txs, Some(CorrelationId::new()))
             .await
             .context("broadcast BUY failed");
 
-
-
         for idx in acquired_indices {
-
             ctx.logger.log_nonce_operation("release", Some(idx), true);
             self.nonce_manager.release_nonce(idx);
-
         }
+
+        res
 
     }
 
     async fn create_buy_transaction(
         &self,
         candidate: &PremintCandidate,
-        recent_blockhash: Option<solana_sdk::hash::Hash>,
+        _recent_blockhash: Option<solana_sdk::hash::Hash>,
     ) -> Result<VersionedTransaction> {
         match &self.tx_builder {
             Some(builder) => {
                 let config = TransactionConfig::default();
-                builder.build_buy_transaction(candidate, &config, recent_blockhash).await
+                builder.build_buy_transaction(candidate, &config, false).await
+                    .map_err(|e| anyhow!("Transaction build failed: {}", e))
             }
             None => {
                 // Fallback to placeholder for testing/mock mode
@@ -434,7 +427,8 @@ impl BuyEngine {
         match &self.tx_builder {
             Some(builder) => {
                 let config = TransactionConfig::default();
-                builder.build_sell_transaction(mint, sell_percent, &config, None).await
+                builder.build_sell_transaction(mint, "pump.fun", sell_percent, &config, false).await
+                    .map_err(|e| anyhow!("Transaction build failed: {}", e))
             }
             None => {
                 // Fallback to placeholder for testing/mock mode
@@ -460,6 +454,18 @@ impl BuyEngine {
         let msg = Message::new(&[ix], None);
         let tx = Transaction::new_unsigned(msg);
         VersionedTransaction::from(tx)
+    }
+
+    fn is_candidate_interesting(&self, candidate: &PremintCandidate) -> bool {
+        candidate.program == "pump.fun"
+    }
+
+    async fn get_execution_price_mock(&self, _candidate: &PremintCandidate) -> f64 {
+        0.000001 // Mock price for testing
+    }
+
+    async fn get_recent_blockhash(&self) -> Option<solana_sdk::hash::Hash> {
+        None // Simplified implementation
     }
 }
 

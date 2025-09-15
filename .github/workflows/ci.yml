@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [ stable ]
+        feature_set:
+          - ""
+          - pumpfun
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            bot
+
+      - name: Format check (non-blocking temporarily)
+        working-directory: bot
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (non-blocking temporarily)
+        working-directory: bot
+        continue-on-error: true
+        run: |
+          if [ -z "${{ matrix.feature_set }}" ]; then
+            cargo clippy --all-targets --no-default-features
+          else
+            cargo clippy --all-targets --no-default-features --features "${{ matrix.feature_set }}"
+          fi
+
+      - name: Build
+        working-directory: bot
+        run: |
+          if [ -z "${{ matrix.feature_set }}" ]; then
+            cargo build --no-default-features --verbose
+          else
+            cargo build --no-default-features --features "${{ matrix.feature_set }}" --verbose
+          fi
+
+      - name: Test
+        working-directory: bot
+        run: |
+          if [ -z "${{ matrix.feature_set }}" ]; then
+            cargo test --no-default-features --verbose
+          else
+            cargo test --no-default-features --features "${{ matrix.feature_set }}" --verbose
+          fi

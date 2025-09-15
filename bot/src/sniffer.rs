@@ -80,6 +80,8 @@ pub fn run_mock_sniffer(sender: CandidateSender) -> JoinHandle<()> {
                 program: "pump.fun".to_string(),
                 slot: 0,
                 timestamp: now_secs,
+                instruction_summary: Some("Mock candidate".to_string()),
+                is_jito_bundle: None,
             };
 
             let now = Instant::now();

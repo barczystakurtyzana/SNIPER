@@ -62,7 +62,7 @@ pub struct ProgramLogEvent {
 }
 
 /// Token profiles for MarketMaker simulation
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TokenProfile {
     /// A promising token that generates growing interest with small swap transactions
     Gem,

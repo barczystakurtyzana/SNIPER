@@ -223,6 +223,8 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            instruction_summary: Some("Test instruction".to_string()),
+            is_jito_bundle: Some(false),
         };
 
         let result = validator.validate_candidate(&valid_candidate);
@@ -234,6 +236,8 @@ mod tests {
             program: "".to_string(),
             slot: 0,
             timestamp: 0,
+            instruction_summary: None,
+            is_jito_bundle: None,
         };
 
         let result = validator.validate_candidate(&invalid_candidate);

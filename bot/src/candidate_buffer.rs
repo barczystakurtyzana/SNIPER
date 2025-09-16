@@ -184,6 +184,8 @@ mod tests {
             program: "mock".to_string(),
             slot: 1,
             timestamp: ts,
+            instruction_summary: None,
+            is_jito_bundle: None,
         }
     }
 

@@ -14,7 +14,7 @@ use sniffer_bot_light::nonce_manager::NonceManager;
 use sniffer_bot_light::rpc_manager::{RpcBroadcaster, RpcManager};
 use sniffer_bot_light::sniffer;
 use sniffer_bot_light::sniffer::runner::SnifferRunner;
-use sniffer_bot_light::tx_builder::TransactionBuilder;
+use sniffer_bot_light::tx_builder::{TransactionBuilder, TransactionConfig};
 use sniffer_bot_light::types::{AppState, CandidateReceiver, CandidateSender, Mode, ProgramLogEvent};
 use sniffer_bot_light::wallet::WalletManager;
 
@@ -33,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
         active_token: None,
         last_buy_price: None,
         holdings_percent: 0.0,
+        quantum_suggestions: Vec::new(),
     }));
 
     let (cand_tx, cand_rx): (CandidateSender, CandidateReceiver) = mpsc::channel(1024);
@@ -51,7 +52,20 @@ async fn main() -> anyhow::Result<()> {
             Ok(wallet) => {
                 let primary_endpoint = cfg.rpc_endpoints.first()
                     .unwrap_or(&"https://api.devnet.solana.com".to_string()).clone();
-                Some(TransactionBuilder::new(wallet, &primary_endpoint))
+                let config = TransactionConfig::default();
+                match TransactionBuilder::new(
+                    Arc::new(wallet), 
+                    vec![primary_endpoint], 
+                    nonce_manager.clone(), 
+                    &config
+                ).await {
+                    Ok(builder) => Some(builder),
+                    Err(e) => {
+                        error!("Failed to create transaction builder: {}", e);
+                        info!("Continuing without transaction builder - will use placeholder transactions");
+                        None
+                    }
+                }
             }
             Err(e) => {
                 error!("Failed to load wallet from {}: {}", keypair_path, e);
@@ -126,6 +140,10 @@ async fn main() -> anyhow::Result<()> {
                     if let Err(e) = handle.sell(p).await {
                         error!(percent=p, error=%e, "Sell failed");
                     }
+                }
+                GuiEvent::Buy(pubkey) => {
+                    info!("GUI requested buy for pubkey: {}", pubkey);
+                    // Handle buy event if needed
                 }
             }
         }

@@ -497,7 +497,7 @@ mod tests {
             mode: Mode::Sniffing,
             active_token: None,
             last_buy_price: None,
-            holdings_percent: 0.0,
+            holdings_percent: 0.0, quantum_suggestions: Vec::new(),
         }));
 
         let mut engine = BuyEngine::new(
@@ -517,7 +517,7 @@ mod tests {
             creator: Pubkey::new_unique(),
             program: "pump.fun".to_string(),
             slot: 0,
-            timestamp: 0,
+            timestamp: 0, instruction_summary: None, is_jito_bundle: None,
         };
         tx.send(candidate).await.unwrap();
         drop(tx);
@@ -551,7 +551,7 @@ mod tests {
             mode: Mode::Sniffing,
             active_token: None,
             last_buy_price: None,
-            holdings_percent: 0.0,
+            holdings_percent: 0.0, quantum_suggestions: Vec::new(),
         }));
 
         #[derive(Debug)]
@@ -604,7 +604,7 @@ mod tests {
             mode: Mode::Sniffing,
             active_token: None,
             last_buy_price: None,
-            holdings_percent: 0.0,
+            holdings_percent: 0.0, quantum_suggestions: Vec::new(),
         }));
 
         let engine = BuyEngine::new(
@@ -624,7 +624,7 @@ mod tests {
             creator: Pubkey::new_unique(),
             program: "pump.fun".to_string(),
             slot: 0,
-            timestamp: 0,
+            timestamp: 0, instruction_summary: None, is_jito_bundle: None,
         };
 
         // First buy should succeed
@@ -652,10 +652,10 @@ mod tests {
                 creator: Pubkey::new_unique(),
                 program: "pump.fun".to_string(),
                 slot: 0,
-                timestamp: 0,
+                timestamp: 0, instruction_summary: None, is_jito_bundle: None,
             }),
             last_buy_price: Some(1.0),
-            holdings_percent: 1.0,
+            holdings_percent: 1.0, quantum_suggestions: Vec::new(),
         }));
 
         let engine = BuyEngine::new(
@@ -685,7 +685,7 @@ mod tests {
             mode: Mode::Sniffing,
             active_token: None,
             last_buy_price: None,
-            holdings_percent: 0.0,
+            holdings_percent: 0.0, quantum_suggestions: Vec::new(),
         }));
 
         let nonce_manager = Arc::new(NonceManager::new(2));
@@ -710,7 +710,7 @@ mod tests {
             creator: Pubkey::new_unique(),
             program: "pump.fun".to_string(),
             slot: 0,
-            timestamp: 0,
+            timestamp: 0, instruction_summary: None, is_jito_bundle: None,
         };
 
         // Perform buy operation - should acquire and release nonces automatically

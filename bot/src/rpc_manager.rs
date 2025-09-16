@@ -140,6 +140,10 @@ impl RpcManager {
         }
     }
 
+    pub fn new_with_config(endpoints: Vec<String>, config: Config) -> Self {
+        Self::new(endpoints, config)
+    }
+
     async fn get_or_create_client(&self, endpoint: &str, commitment: CommitmentConfig) -> Arc<RpcClient> {
         // Try to get existing client first
         {

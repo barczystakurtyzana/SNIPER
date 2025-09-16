@@ -16,6 +16,7 @@ pub mod endpoints;
 pub mod quantum_selector;
 pub mod modes;
 pub mod observability;
+pub mod test_environment;
 
 
 

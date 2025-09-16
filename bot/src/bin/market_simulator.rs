@@ -1,4 +1,5 @@
 /*!
+
 Market Simulator - Complete simulation environment for SNIPER trading bot testing
 
 This binary orchestrates the complete Market Simulator environment including
@@ -8,11 +9,9 @@ trading scenarios for bot testing.
 
 use std::sync::Arc;
 use std::time::Duration;
-
 use anyhow::{Context, Result};
 use tokio::time::sleep;
 use tracing::{info, warn, error};
-
 use sniffer_bot_light::market_maker::{MarketMaker, MarketMakerConfig};
 use sniffer_bot_light::test_environment::{TestEnvironment, TestValidatorConfig};
 use sniffer_bot_light::types::TokenProfile;
@@ -283,11 +282,13 @@ fn parse_args() -> CliConfig {
                     config.loop_interval_ms = args[i + 1].parse().unwrap_or(config.loop_interval_ms);
                     i += 1;
                 }
+
             }
             "--help" => {
                 print_help();
                 std::process::exit(0);
             }
+
             _ => {}
         }
         i += 1;

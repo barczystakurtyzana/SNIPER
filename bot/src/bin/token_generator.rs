@@ -8,7 +8,6 @@ It helps simulate realistic token creation scenarios for testing the SNIPER bot.
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
 use anyhow::{Context, Result};
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
@@ -18,7 +17,6 @@ use solana_sdk::{
 };
 use tokio::time::sleep;
 use tracing::{info, warn, error, debug};
-
 use sniffer_bot_light::types::TokenProfile;
 use sniffer_bot_light::market_maker::{MarketMaker, MarketMakerConfig};
 
@@ -149,9 +147,11 @@ impl TokenGenerator {
     }
 
     /// Get reference to token storage
+
     pub fn token_storage(&self) -> &TokenStorage {
         &self.token_storage
     }
+
 
     /// Set the market maker for token simulation
     pub fn set_market_maker(&mut self, market_maker: Arc<MarketMaker>) {

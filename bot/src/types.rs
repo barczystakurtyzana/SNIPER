@@ -61,6 +61,27 @@ pub struct ProgramLogEvent {
     pub ts_ms: u64,
 }
 
+/// Token profiles for MarketMaker simulation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TokenProfile {
+    /// A promising token that generates growing interest with small swap transactions
+    Gem,
+    /// A token that will perform a rug pull after a random duration (1-3 minutes)
+    RugPull,
+    /// A token with minimal activity that gets removed from active tracking
+    Trash,
+}
+
+/// State of a token being managed by MarketMaker
+#[derive(Debug, Clone)]
+pub struct TokenState {
+    pub mint: Pubkey,
+    pub profile: TokenProfile,
+    pub created_at: std::time::Instant,
+    pub activity_count: u32,
+    pub is_active: bool,
+}
+
 /// Helper function to create a simple versioned transaction for testing
 pub fn create_versioned_transaction(
     instructions: Vec<Instruction>,

@@ -1,195 +1,361 @@
 /*!
-Market Simulator for SNIPER Trading Bot
 
-This is a separate Tokio program that simulates near-real market conditions by generating
-virtual tokens with predefined profiles. It runs in parallel with the Bot (SNIPER/bot)
-and communicates with the same local validator.
+Market Simulator - Complete simulation environment for SNIPER trading bot testing
 
-Usage:
-    cargo run --bin market_simulator [-- [OPTIONS]]
-
-Options:
-    --config <PATH>       Configuration file path (default: config.toml)
-    --duration <SECS>     Simulation duration in seconds (default: unlimited)
-    --interval-min <MS>   Minimum interval between token generation (default: 500ms)
-    --interval-max <MS>   Maximum interval between token generation (default: 5000ms)
-    --help                Show this help message
-
-Examples:
-    cargo run --bin market_simulator
-    cargo run --bin market_simulator -- --duration 3600
-    cargo run --bin market_simulator -- --interval-min 1000 --interval-max 3000
+This binary orchestrates the complete Market Simulator environment including
+both token generation and market making activities to create realistic
+trading scenarios for bot testing.
 */
 
-use std::env;
 use std::sync::Arc;
 use std::time::Duration;
-
 use anyhow::{Context, Result};
-use tokio::time;
-use tracing::{info, error};
-use tracing_subscriber::EnvFilter;
+use tokio::time::sleep;
+use tracing::{info, warn, error};
+use sniffer_bot_light::market_maker::{MarketMaker, MarketMakerConfig};
+use sniffer_bot_light::test_environment::{TestEnvironment, TestValidatorConfig};
+use sniffer_bot_light::types::TokenProfile;
 
-mod token_generator;
-
-use sniffer_bot_light::config::Config;
-use sniffer_bot_light::wallet::WalletManager;
-use sniffer_bot_light::rpc_manager::{RpcManager, RpcBroadcaster};
-use token_generator::{TokenGenerator, SimulatorConfig};
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
-
-    info!("Starting Market Simulator...");
-
-    // Parse command line arguments
-    let args: Vec<String> = env::args().collect();
-    let (_config_path, duration, interval_min, interval_max) = parse_args(&args)?;
-
-    // Load configuration
-    let config = Config::load();
-
-    // Setup RPC manager
-    let rpc_manager = Arc::new(RpcManager::new_with_config(config.rpc_endpoints.clone(), config.clone()));
-    let rpc: Arc<dyn RpcBroadcaster> = rpc_manager.clone();
-
-    // Setup wallet - use random wallet if none configured
-    let wallet = if let Some(keypair_path) = &config.keypair_path {
-        match WalletManager::from_file(keypair_path) {
-            Ok(wallet) => {
-                info!("Loaded wallet from {}", keypair_path);
-                Arc::new(wallet)
-            }
-            Err(e) => {
-                error!("Failed to load wallet from {}: {}", keypair_path, e);
-                info!("Using random wallet for simulation");
-                Arc::new(WalletManager::new_random())
-            }
-        }
-    } else {
-        info!("No keypair configured, using random wallet for simulation");
-        Arc::new(WalletManager::new_random())
-    };
-
-    info!("Simulator wallet pubkey: {}", wallet.pubkey());
-
-    // Create simulator configuration
-    let simulator_config = SimulatorConfig {
-        interval_min: Duration::from_millis(interval_min),
-        interval_max: Duration::from_millis(interval_max),
-    };
-
-    // Initialize token generator
-    let token_generator = TokenGenerator::new(
-        rpc.clone(),
-        wallet.clone(),
-        simulator_config,
-    ).await?;
-
-    info!("Token generator initialized, starting simulation...");
-
-    // Start the token generation loop
-    let generator_handle = tokio::spawn(async move {
-        if let Err(e) = token_generator.run().await {
-            error!("Token generator failed: {}", e);
-        }
-    });
-
-    // Run for specified duration or indefinitely
-    if let Some(duration_secs) = duration {
-        info!("Running simulation for {} seconds", duration_secs);
-        time::sleep(Duration::from_secs(duration_secs)).await;
-        info!("Simulation duration completed, shutting down...");
-    } else {
-        info!("Running simulation indefinitely (Ctrl+C to stop)");
-        // Wait for Ctrl+C
-        tokio::signal::ctrl_c().await?;
-        info!("Received shutdown signal, stopping simulation...");
-    }
-
-    // Clean shutdown
-    generator_handle.abort();
-    info!("Market Simulator stopped");
-
-    Ok(())
+/// Configuration for market simulation
+#[derive(Debug, Clone)]
+pub struct SimulationConfig {
+    /// Duration to run the simulation (in seconds)
+    pub duration_secs: u64,
+    /// Number of tokens to simulate
+    pub token_count: usize,
+    /// MarketMaker configuration
+    pub market_maker: MarketMakerConfig,
+    /// Test environment configuration
+    pub test_env: TestValidatorConfig,
 }
 
-fn parse_args(args: &[String]) -> Result<(String, Option<u64>, u64, u64)> {
-    let mut config_path = "config.toml".to_string();
-    let mut duration = None;
-    let mut interval_min = 500;
-    let mut interval_max = 5000;
+impl Default for SimulationConfig {
+    fn default() -> Self {
+        Self {
+            duration_secs: 300, // 5 minutes
+            token_count: 15,
+            market_maker: MarketMakerConfig {
+                loop_interval_ms: 1000,
+                trader_wallet_count: 8,
+                gem_min_duration_mins: 1,
+                gem_max_duration_mins: 3,
+                rug_min_sleep_mins: 1,
+                rug_max_sleep_mins: 2,
+                trash_transaction_count: 3,
+            },
+            test_env: TestValidatorConfig::default(),
+        }
+    }
+}
 
+/// Market simulator orchestrator
+pub struct MarketSimulator {
+    config: SimulationConfig,
+    test_env: Option<TestEnvironment>,
+    market_maker: Option<Arc<MarketMaker>>,
+}
+
+impl MarketSimulator {
+    /// Create a new market simulator
+    pub fn new(config: SimulationConfig) -> Self {
+        Self {
+            config,
+            test_env: None,
+            market_maker: None,
+        }
+    }
+
+    /// Initialize the simulation environment
+    pub async fn initialize(&mut self) -> Result<()> {
+        info!("🔧 Initializing Market Simulator environment");
+
+        // Initialize test environment
+        let mut test_env = TestEnvironment::new(self.config.test_env.clone());
+        
+        // Note: In a real implementation, you would start the test validator
+        // For this demo, we'll just initialize the MarketMaker component
+        info!("📊 Setting up MarketMaker");
+        test_env.init_market_maker(Some(self.config.market_maker.clone()))?;
+        
+        self.test_env = Some(test_env);
+        
+        // Create standalone MarketMaker for direct control
+        let market_maker = Arc::new(MarketMaker::new(self.config.market_maker.clone())?);
+        self.market_maker = Some(market_maker);
+
+        info!("✅ Market Simulator environment initialized");
+        Ok(())
+    }
+
+    /// Add test tokens to the simulation
+    pub async fn setup_tokens(&self) -> Result<()> {
+        info!("📈 Setting up {} test tokens", self.config.token_count);
+
+        let market_maker = self.market_maker.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("MarketMaker not initialized"))?;
+
+        // Calculate token distribution
+        let gem_count = (self.config.token_count as f64 * 0.3) as usize; // 30% gems
+        let rug_count = (self.config.token_count as f64 * 0.2) as usize; // 20% rug pulls
+        let trash_count = self.config.token_count - gem_count - rug_count; // Rest are trash
+
+        // Add gem tokens
+        for i in 0..gem_count {
+            let mint = solana_sdk::pubkey::Pubkey::new_unique();
+            market_maker.add_token(mint, TokenProfile::Gem).await?;
+            info!("💎 Added Gem token {}/{}: {}", i + 1, gem_count, mint);
+        }
+
+        // Add rug pull tokens
+        for i in 0..rug_count {
+            let mint = solana_sdk::pubkey::Pubkey::new_unique();
+            market_maker.add_token(mint, TokenProfile::RugPull).await?;
+            info!("💀 Added RugPull token {}/{}: {}", i + 1, rug_count, mint);
+        }
+
+        // Add trash tokens
+        for i in 0..trash_count {
+            let mint = solana_sdk::pubkey::Pubkey::new_unique();
+            market_maker.add_token(mint, TokenProfile::Trash).await?;
+            info!("🗑️ Added Trash token {}/{}: {}", i + 1, trash_count, mint);
+        }
+
+        let total_added = market_maker.get_token_count().await;
+        info!("✅ Added {} tokens total (Gems: {}, Rugs: {}, Trash: {})", 
+              total_added, gem_count, rug_count, trash_count);
+
+        Ok(())
+    }
+
+    /// Start the market simulation
+    pub async fn start_simulation(&self) -> Result<tokio::task::JoinHandle<Result<()>>> {
+        info!("🚀 Starting market simulation");
+
+        let market_maker = self.market_maker.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("MarketMaker not initialized"))?;
+
+        let mm_clone = market_maker.clone();
+        let handle = tokio::spawn(async move {
+            mm_clone.start().await.context("MarketMaker execution failed")
+        });
+
+        info!("📊 Market simulation started");
+        Ok(handle)
+    }
+
+    /// Stop the market simulation
+    pub async fn stop_simulation(&self) -> Result<()> {
+        info!("🛑 Stopping market simulation");
+
+        if let Some(market_maker) = &self.market_maker {
+            market_maker.stop().await;
+        }
+
+        if let Some(test_env) = &self.test_env {
+            test_env.stop_market_maker().await?;
+        }
+
+        info!("✅ Market simulation stopped");
+        Ok(())
+    }
+
+    /// Run the complete simulation
+    pub async fn run(&mut self) -> Result<()> {
+        info!("🎭 Starting Market Simulator");
+
+        // Initialize environment
+        self.initialize().await?;
+
+        // Setup tokens
+        self.setup_tokens().await?;
+
+        // Start simulation
+        let simulation_handle = self.start_simulation().await?;
+
+        // Monitor simulation
+        info!("⏳ Running simulation for {} seconds", self.config.duration_secs);
+        let start_time = std::time::Instant::now();
+        let mut last_report = start_time;
+
+        while start_time.elapsed().as_secs() < self.config.duration_secs {
+            // Report progress every 30 seconds
+            if last_report.elapsed().as_secs() >= 30 {
+                let elapsed = start_time.elapsed().as_secs();
+                let remaining = self.config.duration_secs.saturating_sub(elapsed);
+                
+                if let Some(market_maker) = &self.market_maker {
+                    let token_count = market_maker.get_token_count().await;
+                    info!("📊 Simulation progress: {}s elapsed, {}s remaining, {} active tokens", 
+                          elapsed, remaining, token_count);
+                }
+                
+                last_report = std::time::Instant::now();
+            }
+
+            sleep(Duration::from_secs(5)).await;
+        }
+
+        // Stop simulation
+        self.stop_simulation().await?;
+
+        // Wait for simulation thread to complete
+        if let Err(e) = simulation_handle.await {
+            warn!("Simulation task join error: {}", e);
+        }
+
+        info!("🎉 Market simulation completed successfully");
+        Ok(())
+    }
+
+    /// Get simulation statistics
+    pub async fn get_stats(&self) -> Result<SimulationStats> {
+        let token_count = if let Some(market_maker) = &self.market_maker {
+            market_maker.get_token_count().await
+        } else {
+            0
+        };
+
+        Ok(SimulationStats {
+            active_tokens: token_count,
+            duration_secs: self.config.duration_secs,
+            total_configured_tokens: self.config.token_count,
+        })
+    }
+}
+
+/// Simulation statistics
+#[derive(Debug)]
+pub struct SimulationStats {
+    pub active_tokens: usize,
+    pub duration_secs: u64,
+    pub total_configured_tokens: usize,
+}
+
+/// CLI configuration for the market simulator
+#[derive(Debug)]
+struct CliConfig {
+    duration_secs: u64,
+    token_count: usize,
+    trader_wallets: usize,
+    loop_interval_ms: u64,
+}
+
+impl Default for CliConfig {
+    fn default() -> Self {
+        Self {
+            duration_secs: 300, // 5 minutes
+            token_count: 15,
+            trader_wallets: 8,
+            loop_interval_ms: 1000,
+        }
+    }
+}
+
+/// Parse command line arguments
+fn parse_args() -> CliConfig {
+    let args: Vec<String> = std::env::args().collect();
+    let mut config = CliConfig::default();
+    
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--config" => {
-                if i + 1 >= args.len() {
-                    anyhow::bail!("--config requires a path argument");
-                }
-                config_path = args[i + 1].clone();
-                i += 2;
-            }
             "--duration" => {
-                if i + 1 >= args.len() {
-                    anyhow::bail!("--duration requires a number argument");
+                if i + 1 < args.len() {
+                    config.duration_secs = args[i + 1].parse().unwrap_or(config.duration_secs);
+                    i += 1;
                 }
-                duration = Some(args[i + 1].parse()
-                    .with_context(|| "Invalid duration value")?);
-                i += 2;
             }
-            "--interval-min" => {
-                if i + 1 >= args.len() {
-                    anyhow::bail!("--interval-min requires a number argument");
+            "--tokens" => {
+                if i + 1 < args.len() {
+                    config.token_count = args[i + 1].parse().unwrap_or(config.token_count);
+                    i += 1;
                 }
-                interval_min = args[i + 1].parse()
-                    .with_context(|| "Invalid interval-min value")?;
-                i += 2;
             }
-            "--interval-max" => {
-                if i + 1 >= args.len() {
-                    anyhow::bail!("--interval-max requires a number argument");
+            "--traders" => {
+                if i + 1 < args.len() {
+                    config.trader_wallets = args[i + 1].parse().unwrap_or(config.trader_wallets);
+                    i += 1;
                 }
-                interval_max = args[i + 1].parse()
-                    .with_context(|| "Invalid interval-max value")?;
-                i += 2;
+            }
+            "--interval" => {
+                if i + 1 < args.len() {
+                    config.loop_interval_ms = args[i + 1].parse().unwrap_or(config.loop_interval_ms);
+                    i += 1;
+                }
+
             }
             "--help" => {
                 print_help();
                 std::process::exit(0);
             }
-            _ => {
-                anyhow::bail!("Unknown argument: {}", args[i]);
-            }
+
+            _ => {}
         }
+        i += 1;
     }
-
-    if interval_min >= interval_max {
-        anyhow::bail!("interval-min must be less than interval-max");
-    }
-
-    Ok((config_path, duration, interval_min, interval_max))
+    
+    config
 }
 
+/// Print help message
 fn print_help() {
-    println!("Market Simulator for SNIPER Trading Bot");
+    println!("Market Simulator - Complete trading environment simulation");
     println!();
-    println!("USAGE:");
-    println!("    cargo run --bin market_simulator [-- [OPTIONS]]");
+    println!("Usage: market_simulator [OPTIONS]");
     println!();
-    println!("OPTIONS:");
-    println!("    --config <PATH>       Configuration file path (default: config.toml)");
-    println!("    --duration <SECS>     Simulation duration in seconds (default: unlimited)");
-    println!("    --interval-min <MS>   Minimum interval between token generation (default: 500ms)");
-    println!("    --interval-max <MS>   Maximum interval between token generation (default: 5000ms)");
-    println!("    --help                Show this help message");
+    println!("Options:");
+    println!("  --duration <SECS>   Simulation duration in seconds (default: 300)");
+    println!("  --tokens <N>        Number of tokens to simulate (default: 15)");
+    println!("  --traders <N>       Number of trader wallets (default: 8)");
+    println!("  --interval <MS>     Loop interval in milliseconds (default: 1000)");
+    println!("  --help              Show this help message");
     println!();
-    println!("EXAMPLES:");
-    println!("    cargo run --bin market_simulator");
-    println!("    cargo run --bin market_simulator -- --duration 3600");
-    println!("    cargo run --bin market_simulator -- --interval-min 1000 --interval-max 3000");
+    println!("Example:");
+    println!("  market_simulator --duration 600 --tokens 25 --traders 10");
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .init();
+
+    let cli_config = parse_args();
+    
+    info!("🎭 Market Simulator Starting");
+    info!("Configuration: {:?}", cli_config);
+    
+    // Create simulation configuration
+    let config = SimulationConfig {
+        duration_secs: cli_config.duration_secs,
+        token_count: cli_config.token_count,
+        market_maker: MarketMakerConfig {
+            loop_interval_ms: cli_config.loop_interval_ms,
+            trader_wallet_count: cli_config.trader_wallets,
+            gem_min_duration_mins: 1,
+            gem_max_duration_mins: 3,
+            rug_min_sleep_mins: 1,
+            rug_max_sleep_mins: 2,
+            trash_transaction_count: 3,
+        },
+        test_env: TestValidatorConfig::default(),
+    };
+    
+    // Create and run simulator
+    let mut simulator = MarketSimulator::new(config);
+    
+    // Run the simulation
+    match simulator.run().await {
+        Ok(()) => {
+            let stats = simulator.get_stats().await?;
+            info!("📊 Final statistics: {:?}", stats);
+            info!("✅ Market simulation completed successfully");
+        }
+        Err(e) => {
+            error!("❌ Market simulation failed: {}", e);
+            return Err(e);
+        }
+    }
+    
+    Ok(())
 }

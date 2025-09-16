@@ -1,626 +1,447 @@
-//! TokenGenerator module - 1/2 module of Market Simulator
-//! 
-//! This module is responsible for mass-producing virtual tokens with predefined, random profiles.
-//! It implements the core logic for simulating near-real market conditions by creating tokens
-//! with different characteristics (Gem, Rug, Trash) and setting up their associated infrastructure.
+/*!
+Token Generator - Utility to generate test tokens for Market Simulator
+
+This binary creates and manages test tokens for the MarketMaker environment.
+It helps simulate realistic token creation scenarios for testing the SNIPER bot.
+*/
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
-
-use anyhow::Result;
-use fastrand::Rng;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use anyhow::{Context, Result};
+use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
-    compute_budget::ComputeBudgetInstruction,
-    hash::Hash,
-    instruction::{AccountMeta, Instruction},
-    message::{v0::Message as MessageV0, VersionedMessage},
-    native_token::LAMPORTS_PER_SOL,
-    program_pack::Pack,
+    commitment_config::CommitmentConfig,
     pubkey::Pubkey,
-    rent::Rent,
     signature::{Keypair, Signer},
-    system_instruction,
-    transaction::VersionedTransaction,
 };
-use spl_associated_token_account::{
-    get_associated_token_address,
-    instruction::create_associated_token_account,
-};
-use spl_token::{
-    instruction as token_instruction,
-    state::Mint,
-};
-use tokio::sync::RwLock;
-use tokio::time;
-use tracing::{debug, error, info, warn};
+use tokio::time::sleep;
+use tracing::{info, warn, error, debug};
+use sniffer_bot_light::types::TokenProfile;
+use sniffer_bot_light::market_maker::{MarketMaker, MarketMakerConfig};
 
-use sniffer_bot_light::rpc_manager::RpcBroadcaster;
-use sniffer_bot_light::wallet::WalletManager;
-
-/// Token profile types with associated probabilities
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenProfile {
-    /// High-quality token with real metadata and significant liquidity (1% probability)
-    Gem,
-    /// Rug pull token with minimal liquidity, may disappear quickly (9% probability) 
-    Rug,
-    /// Low-quality trash token with poor metadata (90% probability)
-    Trash,
-}
-
-impl TokenProfile {
-    /// Get the probability weight for this profile
-    pub fn weight(&self) -> u32 {
-        match self {
-            TokenProfile::Gem => 1,
-            TokenProfile::Rug => 9,
-            TokenProfile::Trash => 90,
-        }
-    }
-
-    /// Get a description of this profile
-    pub fn description(&self) -> &'static str {
-        match self {
-            TokenProfile::Gem => "Gem - High quality token with real metadata and high liquidity",
-            TokenProfile::Rug => "Rug - Rug pull token with minimal liquidity",
-            TokenProfile::Trash => "Trash - Low quality token with poor metadata",
-        }
-    }
-}
-
-/// Configuration for the token generator
+/// Configuration for token generation
 #[derive(Debug, Clone)]
-pub struct SimulatorConfig {
-    /// Minimum interval between token generations
-    pub interval_min: Duration,
-    /// Maximum interval between token generations
-    pub interval_max: Duration,
+pub struct TokenGeneratorConfig {
+    /// RPC endpoint for blockchain operations
+    pub rpc_endpoint: String,
+    /// Number of tokens to generate per batch
+    pub batch_size: usize,
+    /// Delay between token generations (in milliseconds)
+    pub generation_delay_ms: u64,
+    /// Total number of tokens to generate
+    pub total_tokens: usize,
+    /// Distribution of token profiles (Gem, RugPull, Trash percentages)
+    pub profile_distribution: ProfileDistribution,
 }
 
-/// Information about a generated token
+/// Distribution configuration for token profiles
+#[derive(Debug, Clone)]
+pub struct ProfileDistribution {
+    pub gem_percentage: f64,
+    pub rug_pull_percentage: f64,
+    pub trash_percentage: f64,
+}
+
+impl Default for ProfileDistribution {
+    fn default() -> Self {
+        Self {
+            gem_percentage: 0.3,      // 30% gems
+            rug_pull_percentage: 0.2, // 20% rug pulls
+            trash_percentage: 0.5,    // 50% trash
+        }
+    }
+}
+
+impl Default for TokenGeneratorConfig {
+    fn default() -> Self {
+        Self {
+            rpc_endpoint: "https://api.devnet.solana.com".to_string(),
+            batch_size: 5,
+            generation_delay_ms: 2000,
+            total_tokens: 20,
+            profile_distribution: ProfileDistribution::default(),
+        }
+    }
+}
+
+/// Represents a generated token
 #[derive(Debug, Clone)]
 pub struct GeneratedToken {
-    /// The mint pubkey of the generated token
+    /// Token mint address
     pub mint: Pubkey,
-    /// The profile type of this token
+    /// Token profile (determines behavior)
     pub profile: TokenProfile,
-    /// The creator wallet pubkey
+    /// Creator wallet address
     pub creator: Pubkey,
     /// Timestamp when this token was created
     pub created_at: u64,
-    /// Initial supply that was minted
-    pub initial_supply: u64,
-    /// Amount of liquidity added (in lamports)
-    pub liquidity_lamports: u64,
-    /// Metadata URI (if any)
+    /// Token supply
+    pub supply: u64,
+    /// Token decimals
+    pub decimals: u8,
+    /// Metadata URI (optional)
     pub metadata_uri: Option<String>,
 }
 
-/// Thread-safe storage for generated tokens
-pub type TokenStorage = Arc<RwLock<HashMap<Pubkey, GeneratedToken>>>;
+/// Token storage for managing generated tokens
+#[derive(Debug)]
+pub struct TokenStorage {
+    tokens: HashMap<Pubkey, GeneratedToken>,
+    profiles: HashMap<TokenProfile, Vec<Pubkey>>,
+}
 
-/// Main TokenGenerator struct
+impl TokenStorage {
+    pub fn new() -> Self {
+        Self {
+            tokens: HashMap::new(),
+            profiles: HashMap::new(),
+        }
+    }
+
+    pub fn add_token(&mut self, token: GeneratedToken) {
+        let profile = token.profile;
+        let mint = token.mint;
+        
+        self.tokens.insert(mint, token);
+        self.profiles.entry(profile).or_insert_with(Vec::new).push(mint);
+    }
+
+    pub fn get_tokens_by_profile(&self, profile: TokenProfile) -> Vec<&GeneratedToken> {
+        self.profiles
+            .get(&profile)
+            .map(|mints| mints.iter().filter_map(|mint| self.tokens.get(mint)).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn total_count(&self) -> usize {
+        self.tokens.len()
+    }
+}
+
+/// Main token generator struct
 pub struct TokenGenerator {
+    config: TokenGeneratorConfig,
     /// RPC client for blockchain operations
-    rpc: Arc<dyn RpcBroadcaster>,
-    /// Wallet for signing transactions
-    wallet: Arc<WalletManager>,
-    /// Configuration for the generator
-    config: SimulatorConfig,
-    /// Random number generator
-    rng: Arc<std::sync::Mutex<Rng>>,
-    /// Storage for generated tokens
+    rpc: Arc<RpcClient>,
+    /// Generated token storage
     token_storage: TokenStorage,
-    /// Additional trader wallets for token distribution
-    trader_wallets: Vec<Keypair>,
+    /// Market maker instance for simulation
+    market_maker: Option<Arc<MarketMaker>>,
 }
 
 impl TokenGenerator {
-    /// Create a new TokenGenerator instance
-    pub async fn new(
-        rpc: Arc<dyn RpcBroadcaster>,
-        wallet: Arc<WalletManager>,
-        config: SimulatorConfig,
-    ) -> Result<Self> {
-        let rng = Arc::new(std::sync::Mutex::new(Rng::new()));
-        let token_storage = Arc::new(RwLock::new(HashMap::new()));
-        
-        // Create some trader wallets for token distribution
-        let trader_wallets: Vec<Keypair> = (0..5)
-            .map(|_| Keypair::new())
-            .collect();
-
-        info!("Created {} trader wallets for token distribution", trader_wallets.len());
+    /// Create a new token generator
+    pub fn new(config: TokenGeneratorConfig) -> Result<Self> {
+        let rpc = Arc::new(RpcClient::new_with_commitment(
+            config.rpc_endpoint.clone(),
+            CommitmentConfig::confirmed(),
+        ));
 
         Ok(Self {
-            rpc,
-            wallet,
             config,
-            rng,
-            token_storage,
-            trader_wallets,
+            rpc,
+            token_storage: TokenStorage::new(),
+            market_maker: None,
         })
     }
 
-    /// Get a reference to the token storage
+    /// Get reference to token storage
+
     pub fn token_storage(&self) -> &TokenStorage {
         &self.token_storage
     }
 
-    /// Main execution loop for the token generator
-    pub async fn run(&self) -> Result<()> {
-        info!("Starting token generation loop...");
 
-        loop {
-            // Generate random interval
-            let interval_ms = {
-                let mut rng = self.rng.lock().unwrap();
-                rng.u64(
-                    self.config.interval_min.as_millis() as u64
-                    ..=self.config.interval_max.as_millis() as u64
-                )
-            };
-            let interval = Duration::from_millis(interval_ms);
+    /// Set the market maker for token simulation
+    pub fn set_market_maker(&mut self, market_maker: Arc<MarketMaker>) {
+        self.market_maker = Some(market_maker);
+    }
 
-            debug!("Waiting {} ms before next token generation", interval_ms);
-            time::sleep(interval).await;
-
-            // Generate a token
-            match self.generate_token().await {
-                Ok(token) => {
-                    info!(
-                        "Generated token {} with profile {:?} and {} SOL liquidity",
-                        token.mint,
-                        token.profile,
-                        token.liquidity_lamports as f64 / LAMPORTS_PER_SOL as f64
-                    );
-
-                    // Store the token
-                    let mut storage = self.token_storage.write().await;
-                    storage.insert(token.mint, token);
-                }
-                Err(e) => {
-                    error!("Failed to generate token: {}", e);
-                    // Continue the loop even if one token generation fails
-                }
+    /// Generate a batch of tokens
+    pub async fn generate_batch(&mut self) -> Result<Vec<GeneratedToken>> {
+        info!("Generating batch of {} tokens", self.config.batch_size);
+        
+        let mut generated_tokens = Vec::new();
+        
+        for i in 0..self.config.batch_size {
+            let profile = self.determine_token_profile()?;
+            let token = self.create_token(profile).await?;
+            let mint = token.mint; // Get mint before moving token
+            
+            info!("Generated token {} with profile {:?}: {}", i + 1, profile, mint);
+            generated_tokens.push(token.clone());
+            self.token_storage.add_token(token);
+            
+            // Add to market maker if available
+            if let Some(market_maker) = &self.market_maker {
+                market_maker.add_token(mint, profile).await
+                    .context("Failed to add token to MarketMaker")?;
             }
+            
+            // Sleep between generations
+            if i < self.config.batch_size - 1 {
+                sleep(Duration::from_millis(self.config.generation_delay_ms)).await;
+            }
+        }
+        
+        Ok(generated_tokens)
+    }
+
+    /// Determine token profile based on distribution
+    fn determine_token_profile(&self) -> Result<TokenProfile> {
+        let random = fastrand::f64();
+        let dist = &self.config.profile_distribution;
+        
+        if random < dist.gem_percentage {
+            Ok(TokenProfile::Gem)
+        } else if random < dist.gem_percentage + dist.rug_pull_percentage {
+            Ok(TokenProfile::RugPull)
+        } else {
+            Ok(TokenProfile::Trash)
         }
     }
 
-    /// Generate a single token with random profile
-    pub async fn generate_token(&self) -> Result<GeneratedToken> {
-        // Select random token profile based on probabilities
-        let profile = self.select_random_profile();
-        debug!("Selected profile: {}", profile.description());
-
-        // Generate new mint keypair
+    /// Create a single token (simulated)
+    async fn create_token(&self, profile: TokenProfile) -> Result<GeneratedToken> {
+        // Generate keypair for the token mint
         let mint_keypair = Keypair::new();
-        let mint_pubkey = mint_keypair.pubkey();
-
-        debug!("Generating token with mint: {}", mint_pubkey);
-
-        // Create and send the initialization transaction
-        let transaction = self.create_initialization_transaction(
-            &mint_keypair,
-            &profile,
-        ).await?;
-
-        // Submit transaction
-        match self.submit_transaction(&transaction).await {
-            Ok(signature) => {
-                info!("Token initialization transaction submitted: {}", signature);
-            }
-            Err(e) => {
-                warn!("Failed to submit transaction, using placeholder: {}", e);
-            }
-        }
-
-        // Create token info
-        let (initial_supply, liquidity_lamports, metadata_uri) = self.get_token_parameters(&profile);
-
+        let creator_keypair = Keypair::new();
+        
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("Failed to get timestamp")?
+            .as_secs();
+        
+        // Simulate token creation (in a real implementation, this would create actual SPL tokens)
         let token = GeneratedToken {
-            mint: mint_pubkey,
+            mint: mint_keypair.pubkey(),
             profile,
-            creator: self.wallet.pubkey(),
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs(),
-            initial_supply,
-            liquidity_lamports,
-            metadata_uri,
+            creator: creator_keypair.pubkey(),
+            created_at: timestamp,
+            supply: 1_000_000_000, // 1 billion tokens
+            decimals: 9,
+            metadata_uri: Some(format!("https://metadata.example.com/{}", mint_keypair.pubkey())),
         };
-
-        // Perform additional setup based on profile
-        self.perform_profile_specific_setup(&token).await?;
-
+        
+        debug!("Created token simulation: {:?}", token);
         Ok(token)
     }
 
-    /// Select a random token profile based on weighted probabilities
-    fn select_random_profile(&self) -> TokenProfile {
-        let total_weight = TokenProfile::Gem.weight() 
-            + TokenProfile::Rug.weight() 
-            + TokenProfile::Trash.weight();
+    /// Generate all tokens according to configuration
+    pub async fn generate_all(&mut self) -> Result<()> {
+        info!("Starting token generation: {} total tokens", self.config.total_tokens);
         
-        let random_value = {
-            let mut rng = self.rng.lock().unwrap();
-            rng.u32(0..total_weight)
-        };
+        let batches = (self.config.total_tokens + self.config.batch_size - 1) / self.config.batch_size;
         
-        if random_value < TokenProfile::Gem.weight() {
-            TokenProfile::Gem
-        } else if random_value < TokenProfile::Gem.weight() + TokenProfile::Rug.weight() {
-            TokenProfile::Rug
+        for batch in 0..batches {
+            let remaining = self.config.total_tokens - (batch * self.config.batch_size);
+            let batch_size = remaining.min(self.config.batch_size);
+            
+            // Temporarily adjust batch size for last batch
+            let original_batch_size = self.config.batch_size;
+            self.config.batch_size = batch_size;
+            
+            info!("Generating batch {}/{} ({} tokens)", batch + 1, batches, batch_size);
+            self.generate_batch().await?;
+            
+            // Restore original batch size
+            self.config.batch_size = original_batch_size;
+            
+            // Sleep between batches
+            if batch < batches - 1 {
+                sleep(Duration::from_millis(self.config.generation_delay_ms * 2)).await;
+            }
+        }
+        
+        info!("Token generation completed. Total tokens: {}", self.token_storage.total_count());
+        self.print_summary();
+        
+        Ok(())
+    }
+
+    /// Print generation summary
+    fn print_summary(&self) {
+        info!("=== Token Generation Summary ===");
+        info!("Total tokens generated: {}", self.token_storage.total_count());
+        
+        for profile in [TokenProfile::Gem, TokenProfile::RugPull, TokenProfile::Trash] {
+            let count = self.token_storage.get_tokens_by_profile(profile).len();
+            info!("{:?} tokens: {}", profile, count);
+        }
+    }
+
+    /// Start market simulation with generated tokens
+    pub async fn start_simulation(&self) -> Result<()> {
+        if let Some(market_maker) = &self.market_maker {
+            info!("Starting market simulation with {} tokens", self.token_storage.total_count());
+            market_maker.start().await?;
         } else {
-            TokenProfile::Trash
-        }
-    }
-
-    /// Create the packed initialization transaction
-    async fn create_initialization_transaction(
-        &self,
-        mint_keypair: &Keypair,
-        profile: &TokenProfile,
-    ) -> Result<VersionedTransaction> {
-        let mint_pubkey = mint_keypair.pubkey();
-        let wallet_pubkey = self.wallet.pubkey();
-
-        // Get recent blockhash
-        let blockhash = self.get_recent_blockhash().await?;
-
-        // Calculate required space and rent for mint account
-        let mint_space = Mint::LEN;
-        let rent = Rent::default();
-        let mint_rent_lamports = rent.minimum_balance(mint_space);
-
-        let mut instructions = Vec::new();
-
-        // Add compute budget instructions
-        instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(200_000));
-        instructions.push(ComputeBudgetInstruction::set_compute_unit_price(10_000));
-
-        // 1. Create mint account
-        instructions.push(system_instruction::create_account(
-            &wallet_pubkey,
-            &mint_pubkey,
-            mint_rent_lamports,
-            mint_space as u64,
-            &spl_token::id(),
-        ));
-
-        // 2. Initialize mint
-        instructions.push(token_instruction::initialize_mint(
-            &spl_token::id(),
-            &mint_pubkey,
-            &wallet_pubkey, // mint authority
-            Some(&wallet_pubkey), // freeze authority
-            9, // decimals
-        )?);
-
-        // 3. Create associated token account for initial supply
-        let associated_token_account = get_associated_token_address(&wallet_pubkey, &mint_pubkey);
-        instructions.push(create_associated_token_account(
-            &wallet_pubkey,
-            &wallet_pubkey,
-            &mint_pubkey,
-            &spl_token::id(),
-        ));
-
-        // 4. Mint initial supply
-        let (initial_supply, _, _) = self.get_token_parameters(profile);
-        instructions.push(token_instruction::mint_to(
-            &spl_token::id(),
-            &mint_pubkey,
-            &associated_token_account,
-            &wallet_pubkey,
-            &[],
-            initial_supply,
-        )?);
-
-        // 5. Create metadata account (simplified)
-        if let Some(metadata_instruction) = self.create_metadata_instruction(&mint_pubkey, profile)? {
-            instructions.push(metadata_instruction);
-        }
-
-        // 6. Create liquidity pool (placeholder)
-        instructions.push(self.create_liquidity_pool_instruction(&mint_pubkey, profile)?);
-
-        // Create versioned transaction
-        let message = MessageV0::try_compile(
-            &wallet_pubkey,
-            &instructions,
-            &[],
-            blockhash,
-        )?;
-
-        let versioned_message = VersionedMessage::V0(message);
-        let mut transaction = VersionedTransaction::try_new(versioned_message, &[mint_keypair])?;
-
-        // Sign with wallet
-        self.wallet.sign_transaction(&mut transaction)?;
-
-        Ok(transaction)
-    }
-
-    /// Get recent blockhash from RPC
-    async fn get_recent_blockhash(&self) -> Result<Hash> {
-        // Try to get from one of the RPC clients
-        // This is a simplified implementation
-        Ok(Hash::default()) // Placeholder
-    }
-
-    /// Submit transaction to the network
-    async fn submit_transaction(&self, _transaction: &VersionedTransaction) -> Result<String> {
-        // In a real implementation, this would submit via RPC
-        // For now, return a placeholder signature
-        Ok("placeholder_signature".to_string())
-    }
-
-    /// Create metadata instruction based on profile
-    fn create_metadata_instruction(
-        &self,
-        mint_pubkey: &Pubkey,
-        profile: &TokenProfile,
-    ) -> Result<Option<Instruction>> {
-        match profile {
-            TokenProfile::Gem => {
-                // Create real metadata for gems
-                let metadata_uri = "https://example.com/gem-metadata.json";
-                Ok(Some(self.create_metaplex_metadata_instruction(
-                    mint_pubkey,
-                    "GEM Token",
-                    "GEM",
-                    metadata_uri,
-                )?))
-            }
-            TokenProfile::Rug => {
-                // Empty or junk metadata for rugs
-                Ok(Some(self.create_metaplex_metadata_instruction(
-                    mint_pubkey,
-                    "",
-                    "",
-                    "",
-                )?))
-            }
-            TokenProfile::Trash => {
-                // Poor quality metadata for trash
-                Ok(Some(self.create_metaplex_metadata_instruction(
-                    mint_pubkey,
-                    "TrashCoin",
-                    "TRASH",
-                    "https://example.com/trash.json",
-                )?))
-            }
-        }
-    }
-
-    /// Create Metaplex metadata instruction (simplified)
-    fn create_metaplex_metadata_instruction(
-        &self,
-        mint_pubkey: &Pubkey,
-        name: &str,
-        symbol: &str,
-        uri: &str,
-    ) -> Result<Instruction> {
-        // This is a simplified placeholder for Metaplex metadata creation
-        // In a real implementation, this would use the proper Metaplex SDK
-        
-        // For now, create a memo instruction as placeholder
-        let memo_data = format!(
-            "CREATE_METADATA:{}:{}:{}:{}",
-            mint_pubkey, name, symbol, uri
-        );
-        
-        Ok(Instruction::new_with_bytes(
-            solana_sdk::pubkey!("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"), // Memo program
-            memo_data.as_bytes(),
-            vec![AccountMeta::new_readonly(self.wallet.pubkey(), false)],
-        ))
-    }
-
-    /// Create liquidity pool instruction (placeholder for pump.fun integration)
-    fn create_liquidity_pool_instruction(
-        &self,
-        mint_pubkey: &Pubkey,
-        _profile: &TokenProfile,
-    ) -> Result<Instruction> {
-        // This is a placeholder for creating a liquidity pool on a cloned pump.fun program
-        // In a real implementation, this would integrate with the actual pump.fun contracts
-        
-        let memo_data = format!("CREATE_POOL:{}", mint_pubkey);
-        
-        Ok(Instruction::new_with_bytes(
-            solana_sdk::pubkey!("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"), // Memo program
-            memo_data.as_bytes(),
-            vec![AccountMeta::new_readonly(self.wallet.pubkey(), false)],
-        ))
-    }
-
-    /// Get token parameters based on profile
-    fn get_token_parameters(&self, profile: &TokenProfile) -> (u64, u64, Option<String>) {
-        match profile {
-            TokenProfile::Gem => {
-                let supply = 1_000_000_000 * 10_u64.pow(9); // 1B tokens with 9 decimals
-                let liquidity = 50 * LAMPORTS_PER_SOL; // 50 SOL
-                let metadata_uri = Some("https://example.com/gem-metadata.json".to_string());
-                (supply, liquidity, metadata_uri)
-            }
-            TokenProfile::Rug => {
-                let supply = 100_000_000 * 10_u64.pow(9); // 100M tokens with 9 decimals
-                let liquidity = 1 * LAMPORTS_PER_SOL / 10; // 0.1 SOL
-                (supply, liquidity, None)
-            }
-            TokenProfile::Trash => {
-                let supply = 10_000_000 * 10_u64.pow(9); // 10M tokens with 9 decimals
-                let liquidity = 1 * LAMPORTS_PER_SOL; // 1 SOL
-                let metadata_uri = Some("https://example.com/trash.json".to_string());
-                (supply, liquidity, metadata_uri)
-            }
-        }
-    }
-
-    /// Perform profile-specific setup after token creation
-    async fn perform_profile_specific_setup(&self, token: &GeneratedToken) -> Result<()> {
-        match token.profile {
-            TokenProfile::Gem => {
-                // Distribute tokens to trader wallets
-                self.distribute_to_traders(token).await?;
-                info!("Distributed Gem tokens to trader wallets");
-            }
-            TokenProfile::Rug => {
-                // Add minimal liquidity
-                debug!("Added minimal liquidity for Rug token");
-            }
-            TokenProfile::Trash => {
-                // Standard setup for trash tokens
-                debug!("Standard setup completed for Trash token");
-            }
+            warn!("No MarketMaker configured, skipping simulation");
         }
         Ok(())
     }
 
-    /// Distribute a portion of tokens to trader wallets (for Gems)
-    async fn distribute_to_traders(&self, token: &GeneratedToken) -> Result<()> {
-        let distribution_amount = token.initial_supply / 20; // 5% to traders
-        let amount_per_trader = distribution_amount / self.trader_wallets.len() as u64;
-
-        for (i, trader_wallet) in self.trader_wallets.iter().enumerate() {
-            debug!(
-                "Distributing {} tokens to trader wallet {} ({})",
-                amount_per_trader, i, trader_wallet.pubkey()
-            );
-            // In a real implementation, this would create transfer transactions
+    /// Stop market simulation
+    pub async fn stop_simulation(&self) -> Result<()> {
+        if let Some(market_maker) = &self.market_maker {
+            market_maker.stop().await;
+            info!("Market simulation stopped");
         }
-
         Ok(())
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use std::time::Duration;
-    use sniffer_bot_light::config::Config;
-    use sniffer_bot_light::rpc_manager::{RpcManager, RpcBroadcaster};
-    use sniffer_bot_light::wallet::WalletManager;
+/// CLI configuration for the token generator
+#[derive(Debug)]
+struct CliConfig {
+    tokens: usize,
+    batch_size: usize,
+    delay_ms: u64,
+    rpc_endpoint: String,
+    simulate: bool,
+}
 
-    #[tokio::test]
-    async fn test_token_generator_creation() {
-        // Setup test dependencies
-        let config = Config::default();
-        let rpc_manager = Arc::new(RpcManager::new_with_config(config.rpc_endpoints.clone(), config.clone()));
-        let rpc: Arc<dyn RpcBroadcaster> = rpc_manager.clone();
-        let wallet = Arc::new(WalletManager::new_random());
-        
-        let simulator_config = SimulatorConfig {
-            interval_min: Duration::from_millis(100),
-            interval_max: Duration::from_millis(200),
-        };
-
-        // Test TokenGenerator creation
-        let generator = TokenGenerator::new(rpc, wallet, simulator_config).await;
-        assert!(generator.is_ok());
-
-        let generator = generator.unwrap();
-        
-        // Verify token storage is empty initially
-        let storage = generator.token_storage().read().await;
-        assert_eq!(storage.len(), 0);
-    }
-
-    #[test]
-    fn test_token_profile_weights() {
-        // Test that profile weights are correct
-        assert_eq!(TokenProfile::Gem.weight(), 1);
-        assert_eq!(TokenProfile::Rug.weight(), 9);
-        assert_eq!(TokenProfile::Trash.weight(), 90);
-        
-        // Test total weight is 100 (representing percentages)
-        let total = TokenProfile::Gem.weight() + TokenProfile::Rug.weight() + TokenProfile::Trash.weight();
-        assert_eq!(total, 100);
-    }
-
-    #[test]
-    fn test_token_profile_descriptions() {
-        assert!(TokenProfile::Gem.description().contains("Gem"));
-        assert!(TokenProfile::Rug.description().contains("Rug"));
-        assert!(TokenProfile::Trash.description().contains("Trash"));
-    }
-
-    #[tokio::test]
-    async fn test_token_profile_selection() {
-        let config = Config::default();
-        let rpc_manager = Arc::new(RpcManager::new_with_config(config.rpc_endpoints.clone(), config.clone()));
-        let rpc: Arc<dyn RpcBroadcaster> = rpc_manager.clone();
-        let wallet = Arc::new(WalletManager::new_random());
-        
-        let simulator_config = SimulatorConfig {
-            interval_min: Duration::from_millis(100),
-            interval_max: Duration::from_millis(200),
-        };
-
-        let generator = TokenGenerator::new(rpc, wallet, simulator_config).await.unwrap();
-        
-        // Test profile selection multiple times to check distribution
-        let mut gem_count = 0;
-        let mut rug_count = 0;
-        let mut trash_count = 0;
-        
-        for _ in 0..1000 {
-            let profile = generator.select_random_profile();
-            match profile {
-                TokenProfile::Gem => gem_count += 1,
-                TokenProfile::Rug => rug_count += 1,
-                TokenProfile::Trash => trash_count += 1,
-            }
+impl Default for CliConfig {
+    fn default() -> Self {
+        Self {
+            tokens: 20,
+            batch_size: 5,
+            delay_ms: 2000,
+            rpc_endpoint: "https://api.devnet.solana.com".to_string(),
+            simulate: true,
         }
-        
-        // Trash should be the most common (around 90%)
-        assert!(trash_count > gem_count);
-        assert!(trash_count > rug_count);
-        
-        // Rug should be more common than Gem (9% vs 1%)
-        assert!(rug_count > gem_count);
-        
-        // Basic sanity check that all profiles appear
-        assert!(gem_count > 0);
-        assert!(rug_count > 0);
-        assert!(trash_count > 0);
     }
+}
 
-    #[tokio::test]
-    async fn test_generated_token_parameters() {
-        let config = Config::default();
-        let rpc_manager = Arc::new(RpcManager::new_with_config(config.rpc_endpoints.clone(), config.clone()));
-        let rpc: Arc<dyn RpcBroadcaster> = rpc_manager.clone();
-        let wallet = Arc::new(WalletManager::new_random());
-        
-        let simulator_config = SimulatorConfig {
-            interval_min: Duration::from_millis(100),
-            interval_max: Duration::from_millis(200),
+/// Parse command line arguments
+fn parse_args() -> CliConfig {
+    let args: Vec<String> = std::env::args().collect();
+    let mut config = CliConfig::default();
+    
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--tokens" => {
+                if i + 1 < args.len() {
+                    config.tokens = args[i + 1].parse().unwrap_or(config.tokens);
+                    i += 1;
+                }
+            }
+            "--batch-size" => {
+                if i + 1 < args.len() {
+                    config.batch_size = args[i + 1].parse().unwrap_or(config.batch_size);
+                    i += 1;
+                }
+            }
+            "--delay" => {
+                if i + 1 < args.len() {
+                    config.delay_ms = args[i + 1].parse().unwrap_or(config.delay_ms);
+                    i += 1;
+                }
+            }
+            "--rpc" => {
+                if i + 1 < args.len() {
+                    config.rpc_endpoint = args[i + 1].clone();
+                    i += 1;
+                }
+            }
+            "--no-simulate" => {
+                config.simulate = false;
+            }
+            "--help" => {
+                print_help();
+                std::process::exit(0);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    
+    config
+}
+
+/// Print help message
+fn print_help() {
+    println!("Token Generator - Create test tokens for Market Simulator");
+    println!();
+    println!("Usage: token_generator [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --tokens <N>        Number of tokens to generate (default: 20)");
+    println!("  --batch-size <N>    Tokens per batch (default: 5)");
+    println!("  --delay <MS>        Delay between generations in ms (default: 2000)");
+    println!("  --rpc <URL>         RPC endpoint (default: devnet)");
+    println!("  --no-simulate       Don't start market simulation");
+    println!("  --help              Show this help message");
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .init();
+
+    let cli_config = parse_args();
+    
+    info!("🚀 Starting Token Generator");
+    info!("Configuration: {:?}", cli_config);
+    
+    // Create generator configuration
+    let config = TokenGeneratorConfig {
+        rpc_endpoint: cli_config.rpc_endpoint,
+        batch_size: cli_config.batch_size,
+        generation_delay_ms: cli_config.delay_ms,
+        total_tokens: cli_config.tokens,
+        profile_distribution: ProfileDistribution::default(),
+    };
+    
+    // Create token generator
+    let mut generator = TokenGenerator::new(config)?;
+    
+    // Create and configure market maker if simulation is enabled
+    if cli_config.simulate {
+        let market_maker_config = MarketMakerConfig {
+            loop_interval_ms: 1000,
+            trader_wallet_count: 5,
+            gem_min_duration_mins: 2,
+            gem_max_duration_mins: 4,
+            rug_min_sleep_mins: 1,
+            rug_max_sleep_mins: 3,
+            trash_transaction_count: 3,
         };
-
-        let generator = TokenGenerator::new(rpc, wallet, simulator_config).await.unwrap();
         
-        // Test parameters for each profile type
-        let (gem_supply, gem_liquidity, gem_metadata) = generator.get_token_parameters(&TokenProfile::Gem);
-        let (rug_supply, rug_liquidity, rug_metadata) = generator.get_token_parameters(&TokenProfile::Rug);
-        let (trash_supply, trash_liquidity, trash_metadata) = generator.get_token_parameters(&TokenProfile::Trash);
+        let market_maker = Arc::new(MarketMaker::new(market_maker_config)?);
+        generator.set_market_maker(market_maker.clone());
         
-        // Gem should have the highest supply and liquidity
-        assert!(gem_supply > rug_supply);
-        assert!(gem_supply > trash_supply);
-        assert!(gem_liquidity > rug_liquidity);
-        assert!(gem_liquidity > trash_liquidity);
+        // Generate all tokens
+        generator.generate_all().await?;
         
-        // Gem and Trash should have metadata URIs, Rug should not
-        assert!(gem_metadata.is_some());
-        assert!(rug_metadata.is_none());
-        assert!(trash_metadata.is_some());
+        // Start simulation
+        info!("🎭 Starting market simulation...");
+        let simulation_handle = tokio::spawn(async move {
+            if let Err(e) = market_maker.start().await {
+                error!("Market simulation failed: {}", e);
+            }
+        });
         
-        // Rug should have minimal liquidity
-        assert!(rug_liquidity < gem_liquidity / 10); // Less than 1/10th
+        // Let simulation run for a while
+        info!("⏳ Running simulation for 2 minutes...");
+        sleep(Duration::from_secs(120)).await;
+        
+        // Stop simulation
+        info!("🛑 Stopping simulation...");
+        generator.stop_simulation().await?;
+        
+        // Wait for simulation to finish
+        if let Err(e) = simulation_handle.await {
+            warn!("Simulation task join error: {}", e);
+        }
+    } else {
+        // Just generate tokens without simulation
+        generator.generate_all().await?;
     }
+    
+    info!("✅ Token generation completed successfully");
+    Ok(())
 }

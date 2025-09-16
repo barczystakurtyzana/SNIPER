@@ -31,6 +31,7 @@ use crate::types::PremintCandidate;
 use crate::rpc_manager::RpcManager;
 use crate::buy_engine::BuyEngine;
 use crate::nonce_manager::NonceManager;
+use crate::market_maker::{MarketMaker, MarketMakerConfig};
 
 /// Configuration for the test validator environment
 #[derive(Debug, Clone)]
@@ -83,6 +84,7 @@ pub struct TestEnvironment {
     temp_dir: Option<TempDir>,
     rpc_client: Option<Arc<RpcClient>>,
     test_keypair: Option<Keypair>,
+    market_maker: Option<Arc<MarketMaker>>,
 }
 
 impl TestEnvironment {
@@ -94,6 +96,7 @@ impl TestEnvironment {
             temp_dir: None,
             rpc_client: None,
             test_keypair: None,
+            market_maker: None,
         }
     }
 
@@ -400,9 +403,110 @@ impl TestEnvironment {
         Ok(())
     }
 
+    /// Initialize MarketMaker for testing token activities
+    pub fn init_market_maker(&mut self, config: Option<MarketMakerConfig>) -> Result<()> {
+        let market_maker_config = config.unwrap_or_else(|| MarketMakerConfig {
+            loop_interval_ms: 500, // Faster for testing
+            trader_wallet_count: 5, // Fewer wallets for testing
+            gem_min_duration_mins: 1,
+            gem_max_duration_mins: 2,
+            rug_min_sleep_mins: 1,
+            rug_max_sleep_mins: 2,
+            trash_transaction_count: 2,
+        });
+
+        let market_maker = MarketMaker::new(market_maker_config)
+            .context("Failed to create MarketMaker")?;
+
+        self.market_maker = Some(Arc::new(market_maker));
+        info!("✅ MarketMaker initialized for test environment");
+        Ok(())
+    }
+
+    /// Add a token to MarketMaker for simulation
+    pub async fn add_test_token(&self, mint: Pubkey, profile: crate::types::TokenProfile) -> Result<()> {
+        let market_maker = self.market_maker.as_ref()
+            .ok_or_else(|| anyhow!("MarketMaker not initialized"))?;
+        
+        market_maker.add_token(mint, profile).await
+            .context("Failed to add token to MarketMaker")?;
+        
+        info!("📈 Added test token {} with profile {:?}", mint, profile);
+        Ok(())
+    }
+
+    /// Start MarketMaker activities in the background
+    pub async fn start_market_maker(&self) -> Result<tokio::task::JoinHandle<Result<()>>> {
+        let market_maker = self.market_maker.as_ref()
+            .ok_or_else(|| anyhow!("MarketMaker not initialized"))?;
+        
+        let mm_clone = market_maker.clone();
+        let handle = tokio::spawn(async move {
+            mm_clone.start().await.context("MarketMaker failed")
+        });
+        
+        info!("🚀 MarketMaker started in background");
+        Ok(handle)
+    }
+
+    /// Stop MarketMaker activities
+    pub async fn stop_market_maker(&self) -> Result<()> {
+        if let Some(market_maker) = &self.market_maker {
+            market_maker.stop().await;
+            info!("🛑 MarketMaker stopped");
+        }
+        Ok(())
+    }
+
+    /// Get current MarketMaker token count
+    pub async fn get_market_maker_token_count(&self) -> Result<usize> {
+        let market_maker = self.market_maker.as_ref()
+            .ok_or_else(|| anyhow!("MarketMaker not initialized"))?;
+        
+        Ok(market_maker.get_token_count().await)
+    }
+
+    /// Run a comprehensive test of MarketMaker functionality
+    pub async fn test_market_maker(&mut self) -> Result<()> {
+        info!("🧪 Running MarketMaker functionality test");
+
+        // Initialize MarketMaker
+        self.init_market_maker(None)?;
+
+        // Create test tokens with different profiles
+        let gem_mint = Pubkey::new_unique();
+        let rug_mint = Pubkey::new_unique();
+        let trash_mint = Pubkey::new_unique();
+
+        self.add_test_token(gem_mint, crate::types::TokenProfile::Gem).await?;
+        self.add_test_token(rug_mint, crate::types::TokenProfile::RugPull).await?;
+        self.add_test_token(trash_mint, crate::types::TokenProfile::Trash).await?;
+
+        // Verify tokens were added
+        let token_count = self.get_market_maker_token_count().await?;
+        if token_count != 3 {
+            return Err(anyhow!("Expected 3 tokens, got {}", token_count));
+        }
+
+        // Start MarketMaker
+        let _handle = self.start_market_maker().await?;
+
+        // Let it run for a short period
+        sleep(Duration::from_secs(3)).await;
+
+        // Stop MarketMaker
+        self.stop_market_maker().await?;
+
+        info!("✅ MarketMaker test completed successfully");
+        Ok(())
+    }
+
     /// Stop the test environment
     pub async fn stop(&mut self) -> Result<()> {
         info!("🛑 Stopping test environment");
+
+        // Stop MarketMaker first
+        self.stop_market_maker().await?;
 
         if let Some(mut process) = self.validator_process.take() {
             match process.kill() {
@@ -530,5 +634,29 @@ mod tests {
 
         assert!(!program.program_id.to_string().is_empty());
         assert_eq!(program.program_path, PathBuf::from("/path/to/program.so"));
+    }
+
+    #[tokio::test]
+    async fn test_market_maker_integration() {
+        let config = TestValidatorConfig::default();
+        let mut test_env = TestEnvironment::new(config);
+        
+        // Test MarketMaker initialization
+        let result = test_env.init_market_maker(None);
+        assert!(result.is_ok(), "MarketMaker initialization should succeed");
+        
+        // Test adding tokens
+        let mint = Pubkey::new_unique();
+        let result = test_env.add_test_token(mint, crate::types::TokenProfile::Gem).await;
+        assert!(result.is_ok(), "Adding test token should succeed");
+        
+        // Test token count
+        let count = test_env.get_market_maker_token_count().await;
+        assert!(count.is_ok(), "Getting token count should succeed");
+        assert_eq!(count.unwrap(), 1, "Should have 1 token");
+        
+        // Test stopping MarketMaker
+        let result = test_env.stop_market_maker().await;
+        assert!(result.is_ok(), "Stopping MarketMaker should succeed");
     }
 }

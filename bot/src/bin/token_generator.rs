@@ -496,3 +496,131 @@ impl TokenGenerator {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use sniffer_bot_light::config::Config;
+    use sniffer_bot_light::rpc_manager::{RpcManager, RpcBroadcaster};
+    use sniffer_bot_light::wallet::WalletManager;
+
+    #[tokio::test]
+    async fn test_token_generator_creation() {
+        // Setup test dependencies
+        let config = Config::default();
+        let rpc_manager = Arc::new(RpcManager::new_with_config(config.rpc_endpoints.clone(), config.clone()));
+        let rpc: Arc<dyn RpcBroadcaster> = rpc_manager.clone();
+        let wallet = Arc::new(WalletManager::new_random());
+        
+        let simulator_config = SimulatorConfig {
+            interval_min: Duration::from_millis(100),
+            interval_max: Duration::from_millis(200),
+        };
+
+        // Test TokenGenerator creation
+        let generator = TokenGenerator::new(rpc, wallet, simulator_config).await;
+        assert!(generator.is_ok());
+
+        let generator = generator.unwrap();
+        
+        // Verify token storage is empty initially
+        let storage = generator.token_storage().read().await;
+        assert_eq!(storage.len(), 0);
+    }
+
+    #[test]
+    fn test_token_profile_weights() {
+        // Test that profile weights are correct
+        assert_eq!(TokenProfile::Gem.weight(), 1);
+        assert_eq!(TokenProfile::Rug.weight(), 9);
+        assert_eq!(TokenProfile::Trash.weight(), 90);
+        
+        // Test total weight is 100 (representing percentages)
+        let total = TokenProfile::Gem.weight() + TokenProfile::Rug.weight() + TokenProfile::Trash.weight();
+        assert_eq!(total, 100);
+    }
+
+    #[test]
+    fn test_token_profile_descriptions() {
+        assert!(TokenProfile::Gem.description().contains("Gem"));
+        assert!(TokenProfile::Rug.description().contains("Rug"));
+        assert!(TokenProfile::Trash.description().contains("Trash"));
+    }
+
+    #[tokio::test]
+    async fn test_token_profile_selection() {
+        let config = Config::default();
+        let rpc_manager = Arc::new(RpcManager::new_with_config(config.rpc_endpoints.clone(), config.clone()));
+        let rpc: Arc<dyn RpcBroadcaster> = rpc_manager.clone();
+        let wallet = Arc::new(WalletManager::new_random());
+        
+        let simulator_config = SimulatorConfig {
+            interval_min: Duration::from_millis(100),
+            interval_max: Duration::from_millis(200),
+        };
+
+        let generator = TokenGenerator::new(rpc, wallet, simulator_config).await.unwrap();
+        
+        // Test profile selection multiple times to check distribution
+        let mut gem_count = 0;
+        let mut rug_count = 0;
+        let mut trash_count = 0;
+        
+        for _ in 0..1000 {
+            let profile = generator.select_random_profile();
+            match profile {
+                TokenProfile::Gem => gem_count += 1,
+                TokenProfile::Rug => rug_count += 1,
+                TokenProfile::Trash => trash_count += 1,
+            }
+        }
+        
+        // Trash should be the most common (around 90%)
+        assert!(trash_count > gem_count);
+        assert!(trash_count > rug_count);
+        
+        // Rug should be more common than Gem (9% vs 1%)
+        assert!(rug_count > gem_count);
+        
+        // Basic sanity check that all profiles appear
+        assert!(gem_count > 0);
+        assert!(rug_count > 0);
+        assert!(trash_count > 0);
+    }
+
+    #[tokio::test]
+    async fn test_generated_token_parameters() {
+        let config = Config::default();
+        let rpc_manager = Arc::new(RpcManager::new_with_config(config.rpc_endpoints.clone(), config.clone()));
+        let rpc: Arc<dyn RpcBroadcaster> = rpc_manager.clone();
+        let wallet = Arc::new(WalletManager::new_random());
+        
+        let simulator_config = SimulatorConfig {
+            interval_min: Duration::from_millis(100),
+            interval_max: Duration::from_millis(200),
+        };
+
+        let generator = TokenGenerator::new(rpc, wallet, simulator_config).await.unwrap();
+        
+        // Test parameters for each profile type
+        let (gem_supply, gem_liquidity, gem_metadata) = generator.get_token_parameters(&TokenProfile::Gem);
+        let (rug_supply, rug_liquidity, rug_metadata) = generator.get_token_parameters(&TokenProfile::Rug);
+        let (trash_supply, trash_liquidity, trash_metadata) = generator.get_token_parameters(&TokenProfile::Trash);
+        
+        // Gem should have the highest supply and liquidity
+        assert!(gem_supply > rug_supply);
+        assert!(gem_supply > trash_supply);
+        assert!(gem_liquidity > rug_liquidity);
+        assert!(gem_liquidity > trash_liquidity);
+        
+        // Gem and Trash should have metadata URIs, Rug should not
+        assert!(gem_metadata.is_some());
+        assert!(rug_metadata.is_none());
+        assert!(trash_metadata.is_some());
+        
+        // Rug should have minimal liquidity
+        assert!(rug_liquidity < gem_liquidity / 10); // Less than 1/10th
+    }
+}
